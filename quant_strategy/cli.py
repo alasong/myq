@@ -652,6 +652,13 @@ def create_main_parser():
     scan_parser.add_argument("--start_date", required=True, help="开始日期 YYYYMMDD")
     scan_parser.add_argument("--end_date", required=True, help="结束日期 YYYYMMDD")
 
+    # data search-sector
+    search_sector_parser = data_subparsers.add_parser("search-sector", help="搜索板块（按名称）")
+    search_sector_parser.add_argument("--keyword", required=True, help="搜索关键词")
+    search_sector_parser.add_argument("--sector_type", choices=["industry", "concept", "area", "all"],
+                                      default="all", help="板块类型")
+    search_sector_parser.add_argument("--limit", type=int, default=20, help="显示数量")
+
     # ===== 优化命令 =====
     optimize_parser = subparsers.add_parser("optimize", help="参数优化")
     optimize_parser.add_argument("--strategy", required=True, choices=[
@@ -671,9 +678,10 @@ def create_main_parser():
     backtest_parser.add_argument("--ts_code", type=str, required=True, help="股票代码")
     backtest_parser.add_argument("--start_date", type=str, default="20200101", help="开始日期")
     backtest_parser.add_argument("--end_date", type=str, default="20231231", help="结束日期")
-    backtest_parser.add_argument("--config", type=str, help="配置文件路径")
+    backtest_parser.add_argument("--config", type=str, help="配置文件路径（YAML/JSON）")
     backtest_parser.add_argument("--export", choices=["html", "md", "both"], help="导出报告格式")
     backtest_parser.add_argument("--save_plot", action="store_true", help="是否保存图表")
+    backtest_parser.add_argument("--save-record", action="store_true", help="是否保存回测记录")
 
     # ===== 板块/组合回测命令 =====
     sector_backtest_parser = subparsers.add_parser("sector-backtest", help="板块/组合回测")
@@ -686,6 +694,10 @@ def create_main_parser():
     sector_backtest_parser.add_argument("--end_date", default="20231231", help="结束日期")
     sector_backtest_parser.add_argument("--workers", type=int, help="并发工作进程数")
     sector_backtest_parser.add_argument("--use_processes", action="store_true", help="使用多进程（否则多线程）")
+    sector_backtest_parser.add_argument("--mode", choices=["individual", "portfolio", "leaders"],
+                                        default="individual", help="回测模式")
+    sector_backtest_parser.add_argument("--top_n", type=int, default=5, help="龙头股数量（leaders 模式）")
+    sector_backtest_parser.add_argument("--config", type=str, help="配置文件路径（YAML/JSON）")
 
     # ===== 多策略对比命令 =====
     compare_parser = subparsers.add_parser("compare", help="多策略对比回测")
@@ -710,6 +722,23 @@ def create_main_parser():
     disable_parser = strategy_subparsers.add_parser("disable", help="停用策略")
     disable_parser.add_argument("--name", required=True, help="策略名称")
     disable_parser.add_argument("--reason", default="", help="停用原因")
+
+    # strategy enable-batch (批量激活)
+    enable_batch_parser = strategy_subparsers.add_parser("enable-batch", help="批量激活策略")
+    enable_batch_parser.add_argument("--names", nargs="+", required=True, help="策略名称列表")
+
+    # strategy disable-batch (批量停用)
+    disable_batch_parser = strategy_subparsers.add_parser("disable-batch", help="批量停用策略")
+    disable_batch_parser.add_argument("--names", nargs="+", required=True, help="策略名称列表")
+    disable_batch_parser.add_argument("--reason", default="", help="停用原因")
+
+    # ===== 回测历史命令 =====
+    history_parser = subparsers.add_parser("history", help="回测历史查询")
+    history_parser.add_argument("--strategy", help="策略名称过滤")
+    history_parser.add_argument("--ts_code", help="股票代码过滤")
+    history_parser.add_argument("--limit", type=int, default=20, help="显示数量")
+    history_parser.add_argument("--stats", action="store_true", help="显示策略统计")
+    history_parser.add_argument("--export", action="store_true", help="导出 CSV 报告")
 
     # ===== 批量回测命令 =====
     batch_backtest_parser = subparsers.add_parser("batch-backtest", help="激活策略批量回测")
@@ -830,6 +859,40 @@ def main():
                 scan_stocks(ts_provider, strategy_class, args.ts_codes,
                            args.start_date, args.end_date)
 
+        elif args.data_command == "search-sector":
+            # 搜索板块
+            print("\n" + "=" * 80)
+            print(f"搜索板块：'{args.keyword}'")
+            print("=" * 80)
+            
+            if args.sector_type in ["industry", "all"]:
+                print("\n【行业板块】")
+                df = ts_provider.get_industry_list()
+                if df is not None and not df.empty and 'name' in df.columns:
+                    matches = df[df['name'].str.contains(args.keyword, na=False, case=False)]
+                    for _, row in matches.head(args.limit).iterrows():
+                        print(f"  {row.get('name', 'N/A'):30} | 代码：{row.get('ts_code', 'N/A')}")
+            
+            if args.sector_type in ["concept", "all"]:
+                print("\n【概念板块】")
+                df = ts_provider.get_concept_list()
+                if df is not None and not df.empty and 'name' in df.columns:
+                    matches = df[df['name'].str.contains(args.keyword, na=False, case=False)]
+                    for _, row in matches.head(args.limit).iterrows():
+                        print(f"  {row.get('name', 'N/A'):30} | 代码：{row.get('ts_code', 'N/A')}")
+            
+            if args.sector_type in ["area", "all"]:
+                print("\n【地区板块】")
+                from quant_strategy.data import SectorDataProvider
+                sector_provider = SectorDataProvider(ts_provider.token)
+                df = sector_provider.get_area_list()
+                if df is not None and not df.empty and 'area' in df.columns:
+                    matches = df[df['area'].str.contains(args.keyword, na=False, case=False)]
+                    for _, row in matches.head(args.limit).iterrows():
+                        print(f"  {row.get('area', 'N/A'):30}")
+            
+            print("=" * 80)
+
         elif args.data_command is None:
             parser.parse_args(["data", "--help"])
 
@@ -944,18 +1007,36 @@ def main():
     elif args.command == "backtest":
         # 运行回测
         from quant_strategy.main import run_backtest
-        from quant_strategy.analyzer import ReportExporter
+        from quant_strategy.analyzer import ReportExporter, BacktestHistory
+        from quant_strategy.config import BacktestConfigLoader
 
+        # 从配置文件加载
         if args.config:
-            config = Config.from_yaml(args.config)
+            config = BacktestConfigLoader.load(args.config)
+            logger.info(f"已从配置文件加载：{args.config}")
         else:
-            config.strategy.name = args.strategy
-            config.ts_code = args.ts_code
-            config.start_date = args.start_date
-            config.end_date = args.end_date
-            config.backtest.save_plot = args.save_plot
+            config = type('obj', (object,), {
+                'strategy': type('obj', (object,), {'name': args.strategy, 'params': {}})(),
+                'ts_code': args.ts_code,
+                'start_date': args.start_date,
+                'end_date': args.end_date,
+                'backtest': type('obj', (object,), {'save_plot': args.save_plot})()
+            })()
 
         result = run_backtest(config)
+
+        # 保存回测记录
+        if result and getattr(args, 'save_record', True):
+            history = BacktestHistory()
+            history.add_record(
+                result=result,
+                strategy=args.strategy if not args.config else config.strategy.name,
+                ts_code=args.ts_code if not args.config else config.ts_code,
+                start_date=args.start_date if not args.config else config.start_date,
+                end_date=args.end_date if not args.config else config.end_date,
+                notes=f"CLI 回测"
+            )
+            logger.info(f"已保存回测记录到历史")
 
         # 导出报告
         if args.export and result:
@@ -977,7 +1058,36 @@ def main():
             DMIStrategy, CCIStrategy, MACDStrategy, VolumePriceStrategy,
             VolumeSentimentStrategy, FearGreedStrategy, OpenInterestStrategy
         )
-        from quant_strategy.backtester import ParallelBacktester, BacktestConfig
+        from quant_strategy.backtester import EnhancedSectorBacktester, BacktestConfig
+        from quant_strategy.config import BacktestConfigLoader
+
+        # 从配置文件加载
+        if args.config:
+            bt_config = BacktestConfigLoader.load(args.config)
+            strategy_name = bt_config.strategy
+            ts_codes = bt_config.ts_codes if bt_config.ts_codes else args.ts_codes
+            sector_type = bt_config.sector_type
+            sector_name = bt_config.sector_name
+            start_date = bt_config.start_date
+            end_date = bt_config.end_date
+            mode = bt_config.mode
+            top_n = bt_config.top_n
+            workers = bt_config.workers
+            use_processes = bt_config.use_processes
+            strategy_params = bt_config.strategy_params
+            logger.info(f"已从配置文件加载：{args.config}")
+        else:
+            strategy_name = args.strategy
+            ts_codes = args.ts_codes
+            sector_type = args.sector_type
+            sector_name = args.sector_name
+            start_date = args.start_date
+            end_date = args.end_date
+            mode = args.mode
+            top_n = args.top_n
+            workers = args.workers
+            use_processes = args.use_processes
+            strategy_params = {}
 
         strategy_map = {
             "dual_ma": DualMAStrategy,
@@ -993,58 +1103,62 @@ def main():
             "fear_greed": FearGreedStrategy,
             "open_interest": OpenInterestStrategy
         }
-        strategy_class = strategy_map.get(args.strategy)
+        strategy_class = strategy_map.get(strategy_name)
 
         if not strategy_class:
-            logger.error(f"未知策略：{args.strategy}")
+            logger.error(f"未知策略：{strategy_name}")
             return
 
         # 获取股票列表
-        ts_codes = []
-        if args.sector_type == "custom":
-            if not args.ts_codes:
+        final_ts_codes = []
+        if sector_type == "custom":
+            if not ts_codes:
                 logger.error("自定义模式需要指定 --ts_codes")
                 return
-            ts_codes = args.ts_codes
+            final_ts_codes = ts_codes
         else:
             # 从板块获取股票
-            if args.sector_type == "industry":
-                df = ts_provider.get_industry_stocks(industry_name=args.sector_name)
-            elif args.sector_type == "concept":
-                df = ts_provider.get_concept_stocks(concept_name=args.sector_name)
-            elif args.sector_type == "area":
+            if sector_type == "industry":
+                df = ts_provider.get_industry_stocks(industry_name=sector_name)
+            elif sector_type == "concept":
+                df = ts_provider.get_concept_stocks(concept_name=sector_name)
+            elif sector_type == "area":
                 from quant_strategy.data import SectorDataProvider
                 sector_provider = SectorDataProvider(ts_provider.token)
-                df = sector_provider.get_area_stocks(area=args.sector_name)
+                df = sector_provider.get_area_stocks(area=sector_name)
             else:
-                logger.error(f"未知板块类型：{args.sector_type}")
+                logger.error(f"未知板块类型：{sector_type}")
                 return
 
             if df is not None and not df.empty:
-                ts_codes = df["ts_code"].tolist()[:50]  # 限制 50 只
-                logger.info(f"板块包含 {len(ts_codes)} 只股票")
+                final_ts_codes = df["ts_code"].tolist()[:50]  # 限制 50 只
+                logger.info(f"板块包含 {len(final_ts_codes)} 只股票")
             else:
                 logger.error("未获取到板块成分股")
                 return
 
-        # 执行并行回测
-        backtester = ParallelBacktester(
-            max_workers=args.workers,
-            use_processes=args.use_processes
+        # 执行回测
+        backtester = EnhancedSectorBacktester(
+            max_workers=workers,
+            use_processes=use_processes
         )
 
         results = backtester.backtest_sector(
             strategy_class=strategy_class,
-            ts_codes=ts_codes,
+            ts_codes=final_ts_codes,
             data_provider=ts_provider,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            show_progress=True
+            start_date=start_date,
+            end_date=end_date,
+            strategy_params=strategy_params,
+            show_progress=True,
+            mode=mode,
+            top_n=top_n
         )
 
         # 汇总结果
         print("\n" + "=" * 80)
         print("板块回测结果汇总")
+        print(f"回测模式：{mode}")
         print("=" * 80)
 
         summary_data = []
@@ -1150,8 +1264,74 @@ def main():
             else:
                 logger.error(f"策略 {args.name} 不存在")
 
+        elif args.strategy_command == "enable-batch":
+            # 批量激活
+            success_count = 0
+            for name in args.names:
+                if manager.enable(name):
+                    success_count += 1
+                    logger.info(f"策略 {name} 已激活")
+                else:
+                    logger.error(f"策略 {name} 不存在")
+            logger.info(f"批量激活完成：{success_count}/{len(args.names)} 个策略")
+
+        elif args.strategy_command == "disable-batch":
+            # 批量停用
+            success_count = 0
+            for name in args.names:
+                if manager.disable(name, args.reason):
+                    success_count += 1
+                    logger.info(f"策略 {name} 已停用：{args.reason}")
+                else:
+                    logger.error(f"策略 {name} 不存在")
+            logger.info(f"批量停用完成：{success_count}/{len(args.names)} 个策略")
+
         elif args.strategy_command is None:
             print(manager.list_strategies(show_all=True))
+
+    elif args.command == "history":
+        # 回测历史查询
+        from quant_strategy.analyzer import BacktestHistory
+
+        history = BacktestHistory()
+
+        if args.stats:
+            # 显示策略统计
+            stats = history.get_strategy_stats()
+            if not stats.empty:
+                print("\n" + "=" * 80)
+                print("策略统计")
+                print("=" * 80)
+                print(stats.to_string())
+                print("=" * 80)
+            else:
+                logger.info("暂无回测记录")
+        elif args.export:
+            # 导出报告
+            output_path = history.export_report()
+            if output_path:
+                logger.info(f"报告已导出：{output_path}")
+        else:
+            # 查询记录
+            df = history.get_recent_records(limit=args.limit)
+            if not df.empty:
+                print("\n" + "=" * 100)
+                print("回测历史记录")
+                print("=" * 100)
+                
+                # 选择显示的列
+                display_cols = ['timestamp', 'strategy', 'ts_code', 'total_return', 
+                               'sharpe_ratio', 'max_drawdown', 'total_trades', 'notes']
+                display_df = df[display_cols].copy()
+                display_df['total_return'] = display_df['total_return'].apply(lambda x: f"{x:.2%}")
+                display_df['sharpe_ratio'] = display_df['sharpe_ratio'].apply(lambda x: f"{x:.2f}")
+                display_df['max_drawdown'] = display_df['max_drawdown'].apply(lambda x: f"{x:.2%}")
+                
+                print(display_df.to_string(index=False))
+                print("=" * 100)
+                print(f"共 {len(df)} 条记录")
+            else:
+                logger.info("暂无回测记录")
 
     elif args.command == "batch-backtest":
         # 批量回测激活的策略

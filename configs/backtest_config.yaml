@@ -1,0 +1,30 @@
+# 回测配置文件示例
+# 使用方式：python -m quant_strategy.cli backtest --config backtest_config.yaml
+
+# 策略配置
+strategy: dual_ma
+strategy_params:
+  short_window: 5
+  long_window: 20
+
+# 回测标的
+ts_code: "000001.SZ"
+
+# 日期范围
+start_date: "20230101"
+end_date: "20231231"
+
+# 交易配置
+initial_cash: 100000
+commission_rate: 0.0003
+slippage_rate: 0.001
+max_position_pct: 1.0
+
+# 输出配置
+save_record: true
+export_report: ""  # html/md/both
+save_plot: false
+output_dir: "./output"
+
+# 备注
+notes: "双均线策略回测"

@@ -1,0 +1,18 @@
+{
+  "strategy": "first_limit_up",
+  "strategy_params": {
+    "min_close_ratio": 0.095,
+    "min_volume_ratio": 1.5,
+    "hold_days": 3,
+    "stop_loss": 0.05,
+    "take_profit": 0.15
+  },
+  "ts_code": "300001.SZ",
+  "start_date": "20250101",
+  "end_date": "20251231",
+  "mode": "individual",
+  "workers": 4,
+  "initial_cash": 100000,
+  "save_record": true,
+  "notes": "首板打板策略回测"
+}
