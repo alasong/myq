@@ -17,7 +17,11 @@ from loguru import logger
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from quant_strategy.data import TushareDataProvider
-from quant_strategy.strategy import DualMAStrategy, MomentumStrategy
+from quant_strategy.strategy import (
+    DualMAStrategy, MomentumStrategy,
+    KDJStrategy, RSIStrategy, BOLLStrategy,
+    DMIStrategy, CCIStrategy, MACDStrategy, VolumePriceStrategy
+)
 from quant_strategy.backtester import Backtester, BacktestConfig
 from quant_strategy.analyzer import PerformanceAnalyzer, Visualizer
 from quant_strategy.config import Config
@@ -77,24 +81,28 @@ def run_backtest(config: Config):
     # 初始化策略
     strategy_name = config.strategy.name
     strategy_params = config.strategy.params
-    
+
     logger.info(f"初始化策略：{strategy_name}, 参数：{strategy_params}")
-    
-    if strategy_name.lower() == "dual_ma":
-        strategy = DualMAStrategy(
-            short_window=strategy_params.get("short_window", 5),
-            long_window=strategy_params.get("long_window", 20)
-        )
-    elif strategy_name.lower() == "momentum":
-        strategy = MomentumStrategy(
-            lookback_period=strategy_params.get("lookback_period", 20),
-            rsi_period=strategy_params.get("rsi_period", 14),
-            rsi_oversold=strategy_params.get("rsi_oversold", 30),
-            rsi_overbought=strategy_params.get("rsi_overbought", 70)
-        )
-    else:
+
+    # 策略工厂
+    strategy_classes = {
+        "dual_ma": DualMAStrategy,
+        "momentum": MomentumStrategy,
+        "kdj": KDJStrategy,
+        "rsi": RSIStrategy,
+        "boll": BOLLStrategy,
+        "dmi": DMIStrategy,
+        "cci": CCIStrategy,
+        "macd": MACDStrategy,
+        "volume_price": VolumePriceStrategy
+    }
+
+    strategy_class = strategy_classes.get(strategy_name.lower())
+    if not strategy_class:
         logger.error(f"未知策略：{strategy_name}")
         return
+
+    strategy = strategy_class(**strategy_params)
     
     # 初始化回测引擎
     backtest_config = BacktestConfig(
