@@ -132,22 +132,26 @@ class Backtester:
             # 生成信号
             signal = self.strategy.generate_signal(data, i)
             self.strategy.current_idx = i
-            
+
             # 记录信号
-            signals_log.append({
-                "date": current_date,
-                "signal_type": signal.signal_type.value,
-                "price": signal.price,
-                "strength": signal.strength,
-                "reason": signal.reason,
-                "position": self.strategy.position
-            })
-            
-            # 执行信号
-            self._execute_signal(signal, data, i)
-            
-            # Bar 结束回调
-            self.strategy.on_bar_end(data, i, signal)
+            if signal:
+                signals_log.append({
+                    "date": current_date,
+                    "signal_type": signal.signal_type.value,
+                    "price": signal.price,
+                    "strength": signal.strength,
+                    "reason": signal.reason,
+                    "position": self.strategy.position
+                })
+
+                # 执行信号
+                self._execute_signal(signal, data, i)
+
+                # Bar 结束回调
+                self.strategy.on_bar_end(data, i, signal)
+            else:
+                # 无信号时也调用回调
+                self.strategy.on_bar_end(data, i, None)
             
             # 记录每日资产
             current_price = data.iloc[i]["close"]
