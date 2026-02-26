@@ -1,6 +1,7 @@
 from .engine import Backtester, BacktestConfig, BacktestResult
 from .broker import SimulatedBroker
 from .parallel_engine import ParallelBacktester, BacktestTask, BacktestTaskResult, run_parallel_backtest
+from .vectorized_engine import VectorizedBacktester, VectorizedTrade, run_vectorized_backtest
 
 __all__ = [
     "Backtester",
@@ -10,5 +11,8 @@ __all__ = [
     "ParallelBacktester",
     "BacktestTask",
     "BacktestTaskResult",
-    "run_parallel_backtest"
+    "run_parallel_backtest",
+    "VectorizedBacktester",
+    "VectorizedTrade",
+    "run_vectorized_backtest"
 ]

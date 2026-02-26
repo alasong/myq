@@ -21,6 +21,9 @@ loguru>=0.7.0
 # 进度条
 tqdm>=4.65.0
 
+# 参数优化
+optuna>=3.0.0
+
 # 可选：Jupyter 支持
 # jupyterlab>=4.0.0
 # ipywidgets>=8.0.0

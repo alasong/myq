@@ -1,22 +1,53 @@
 """
 数据缓存模块
 支持本地缓存 Tushare 数据，减少 API 调用
+优化功能：
+- TTL 过期检查
+- LRU 淘汰策略
+- 缓存大小限制
 """
 import os
 import pandas as pd
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from loguru import logger
+import time
+from collections import OrderedDict
 
 
 class DataCache:
     """本地数据缓存管理"""
 
-    def __init__(self, cache_dir: str = "./data_cache"):
+    def __init__(self, cache_dir: str = "./data_cache", 
+                 max_size_mb: float = 1024, 
+                 ttl_days: int = 30):
+        """
+        初始化数据缓存
+        
+        Args:
+            cache_dir: 缓存目录
+            max_size_mb: 最大缓存大小 (MB)
+            ttl_days: 缓存 TTL (天)
+        """
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_file = self.cache_dir / "metadata.csv"
         self._metadata = self._load_metadata()
+        
+        # 缓存配置
+        self.max_size_mb = max_size_mb
+        self.ttl_days = ttl_days
+        
+        # LRU 访问记录
+        self._access_log = OrderedDict()
+        self._load_access_log()
+        
+        # 内存缓存统计
+        self._stats = {
+            "hits": 0,
+            "misses": 0,
+            "evictions": 0
+        }
 
     def _load_metadata(self) -> pd.DataFrame:
         """加载缓存元数据"""
@@ -27,11 +58,105 @@ class DataCache:
     def _save_metadata(self):
         """保存缓存元数据"""
         self._metadata.to_csv(self.metadata_file, index=False)
+    
+    def _load_access_log(self):
+        """加载 LRU 访问日志"""
+        access_file = self.cache_dir / "access_log.csv"
+        if access_file.exists():
+            try:
+                df = pd.read_csv(access_file)
+                for _, row in df.iterrows():
+                    self._access_log[row["key"]] = row["timestamp"]
+            except:
+                pass
+    
+    def _save_access_log(self):
+        """保存 LRU 访问日志"""
+        access_file = self.cache_dir / "access_log.csv"
+        df = pd.DataFrame([
+            {"key": key, "timestamp": ts}
+            for key, ts in self._access_log.items()
+        ])
+        if not df.empty:
+            df.to_csv(access_file, index=False)
 
     def _generate_key(self, data_type: str, params: dict) -> str:
         """生成缓存键"""
         param_str = "_".join(f"{k}={v}" for k, v in sorted(params.items()))
         return f"{data_type}_{param_str}"
+    
+    def _update_access_log(self, key: str):
+        """更新访问日志（LRU）"""
+        if key in self._access_log:
+            del self._access_log[key]
+        self._access_log[key] = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # 限制访问日志大小
+        if len(self._access_log) > 10000:
+            # 保留最近的 5000 条
+            keys = list(self._access_log.keys())[5000:]
+            for k in list(self._access_log.keys())[:5000]:
+                del self._access_log[k]
+        
+        self._save_access_log()
+    
+    def _get_cache_age_days(self, updated_at: str) -> float:
+        """获取缓存年龄（天）"""
+        try:
+            cache_time = datetime.strptime(updated_at, "%Y%m%d_%H%M%S")
+            age = datetime.now() - cache_time
+            return age.total_seconds() / 86400
+        except:
+            return 999999  # 无法解析时认为非常老
+    
+    def _check_ttl_expired(self, updated_at: str) -> bool:
+        """检查 TTL 是否过期"""
+        age_days = self._get_cache_age_days(updated_at)
+        return age_days > self.ttl_days
+    
+    def _enforce_size_limit(self):
+        """执行缓存大小限制（LRU 淘汰）"""
+        current_size_mb = self._get_total_size_mb()
+        
+        if current_size_mb <= self.max_size_mb:
+            return
+        
+        # 按 LRU 顺序淘汰
+        keys_to_remove = list(self._access_log.keys())
+        
+        for key in keys_to_remove:
+            if current_size_mb <= self.max_size_mb * 0.8:  # 淘汰到 80% 以下
+                break
+            
+            # 找到对应的元数据
+            cache_entry = self._metadata[self._metadata["key"] == key]
+            if not cache_entry.empty:
+                path = cache_entry.iloc[0]["path"]
+                try:
+                    if Path(path).exists():
+                        file_size = Path(path).stat().st_size / 1024 / 1024
+                        Path(path).unlink()
+                        current_size_mb -= file_size
+                        self._metadata = self._metadata[self._metadata["key"] != key]
+                        self._stats["evictions"] += 1
+                        logger.debug(f"LRU 淘汰：{key} ({file_size:.2f} MB)")
+                except Exception as e:
+                    logger.warning(f"淘汰缓存失败：{e}")
+            
+            if key in self._access_log:
+                del self._access_log[key]
+        
+        self._save_metadata()
+    
+    def _get_total_size_mb(self) -> float:
+        """获取当前缓存总大小 (MB)"""
+        total_size = 0
+        for _, row in self._metadata.iterrows():
+            try:
+                total_size += Path(row["path"]).stat().st_size
+            except:
+                pass
+        return total_size / 1024 / 1024
 
     def get(self, data_type: str, params: dict, start_date: str = None, end_date: str = None) -> pd.DataFrame | None:
         """
@@ -50,10 +175,20 @@ class DataCache:
         cache_entry = self._metadata[self._metadata["key"] == key]
 
         if cache_entry.empty:
+            self._stats["misses"] += 1
             return None
 
+        # 检查 TTL
+        updated_at = cache_entry.iloc[0]["updated_at"]
+        if self._check_ttl_expired(updated_at):
+            logger.debug(f"缓存过期：{key} (已 {self._get_cache_age_days(updated_at):.1f} 天)")
+            self._delete_cache_entry(cache_entry.iloc[0])
+            self._stats["misses"] += 1
+            return None
+        
         cache_path = Path(cache_entry.iloc[0]["path"])
         if not cache_path.exists():
+            self._stats["misses"] += 1
             return None
 
         try:
@@ -64,12 +199,16 @@ class DataCache:
                 df["trade_date"] = df["trade_date"].astype(str)
                 mask = (df["trade_date"] >= start_date) & (df["trade_date"] <= end_date)
                 if mask.sum() == 0:
+                    self._stats["misses"] += 1
                     return None
 
             logger.debug(f"缓存命中：{key}")
+            self._stats["hits"] += 1
+            self._update_access_log(key)  # 更新 LRU
             return df
         except Exception as e:
             logger.warning(f"读取缓存失败：{e}")
+            self._stats["misses"] += 1
             return None
 
     def set(self, data_type: str, params: dict, df: pd.DataFrame):
@@ -81,6 +220,9 @@ class DataCache:
             params: 查询参数
             df: 要缓存的 DataFrame
         """
+        # 先执行 LRU 淘汰，确保有空间
+        self._enforce_size_limit()
+        
         key = self._generate_key(data_type, params)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{key}_{timestamp}.parquet"
@@ -102,9 +244,26 @@ class DataCache:
 
             self._metadata = pd.concat([self._metadata, new_entry], ignore_index=True)
             self._save_metadata()
+            
+            # 更新 LRU 访问
+            self._update_access_log(key)
+            
             logger.debug(f"缓存保存：{key} -> {cache_path}")
         except Exception as e:
             logger.error(f"保存缓存失败：{e}")
+    
+    def _delete_cache_entry(self, entry: pd.Series):
+        """删除缓存条目"""
+        try:
+            cache_path = Path(entry["path"])
+            if cache_path.exists():
+                cache_path.unlink()
+            self._metadata = self._metadata[self._metadata["key"] != entry["key"]]
+            if entry["key"] in self._access_log:
+                del self._access_log[entry["key"]]
+            self._save_metadata()
+        except Exception as e:
+            logger.warning(f"删除缓存失败：{e}")
 
     def list_cache(self, data_type: str = None, ts_code: str = None) -> pd.DataFrame:
         """
@@ -118,19 +277,27 @@ class DataCache:
             缓存元数据 DataFrame
         """
         df = self._metadata.copy()
-        
+
         if data_type:
             df = df[df["data_type"] == data_type]
-        
+
         if ts_code:
             df = df[df["ts_code"] == ts_code]
-        
+
         # 添加文件大小信息
         if not df.empty:
             df["size_mb"] = df["path"].apply(
                 lambda x: round(Path(x).stat().st_size / 1024 / 1024, 2) if Path(x).exists() else 0
             )
-        
+            # 添加缓存年龄
+            df["age_days"] = df["updated_at"].apply(
+                lambda x: round(self._get_cache_age_days(x), 1)
+            )
+            # 添加是否过期标记
+            df["expired"] = df["updated_at"].apply(
+                lambda x: self._check_ttl_expired(x)
+            )
+
         return df
 
     def get_cached_stocks(self) -> list:
@@ -156,32 +323,42 @@ class DataCache:
                 "total_files": 0,
                 "total_size_mb": 0,
                 "stock_count": 0,
-                "data_types": {}
+                "data_types": {},
+                "hit_rate": 0,
+                "evictions": 0
             }
-        
+
         total_size = 0
         for _, row in self._metadata.iterrows():
             try:
                 total_size += Path(row["path"]).stat().st_size
             except:
                 pass
-        
+
         # 兼容旧数据（没有 data_type 列）
         if "data_type" in self._metadata.columns:
             data_types = self._metadata["data_type"].value_counts().to_dict()
         else:
             data_types = {}
-        
+
         if "ts_code" in self._metadata.columns:
             stock_count = self._metadata["ts_code"].dropna().nunique()
         else:
             stock_count = 0
         
+        # 计算命中率
+        total_access = self._stats["hits"] + self._stats["misses"]
+        hit_rate = self._stats["hits"] / total_access if total_access > 0 else 0
+
         return {
             "total_files": len(self._metadata),
             "total_size_mb": round(total_size / 1024 / 1024, 2),
             "stock_count": stock_count,
-            "data_types": data_types
+            "data_types": data_types,
+            "hit_rate": hit_rate,
+            "evictions": self._stats["evictions"],
+            "max_size_mb": self.max_size_mb,
+            "ttl_days": self.ttl_days
         }
 
     def clear(self, older_than_days: int = None):
@@ -191,7 +368,6 @@ class DataCache:
         Args:
             older_than_days: 如果指定，只清理超过此天数的缓存
         """
-        import time
         cutoff = time.time() - (older_than_days * 86400) if older_than_days else 0
 
         for _, row in self._metadata.iterrows():
@@ -216,3 +392,13 @@ class DataCache:
 
         self._save_metadata()
         logger.info(f"缓存清理完成")
+    
+    def get_stats(self) -> dict:
+        """获取详细统计信息"""
+        stats = self.get_cache_stats()
+        stats.update({
+            "cache_hits": self._stats["hits"],
+            "cache_misses": self._stats["misses"],
+            "lru_entries": len(self._access_log)
+        })
+        return stats

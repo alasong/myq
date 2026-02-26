@@ -18,6 +18,9 @@ from .sentiment import (
     FearGreedStrategy,
     OpenInterestStrategy
 )
+from .strategy_manager import StrategyManager, StrategyStatus
+from .indicators import TechnicalIndicators, IndicatorCache, get_indicators, clear_indicator_cache
+from .vectorized_strategy import VectorizedStrategy, VectorizedSignal, SignalGenerator
 
 __all__ = [
     "BaseStrategy",
@@ -37,5 +40,14 @@ __all__ = [
     "LimitUpStrategy",
     "VolumeSentimentStrategy",
     "FearGreedStrategy",
-    "OpenInterestStrategy"
+    "OpenInterestStrategy",
+    "StrategyManager",
+    "StrategyStatus",
+    "TechnicalIndicators",
+    "IndicatorCache",
+    "get_indicators",
+    "clear_indicator_cache",
+    "VectorizedStrategy",
+    "VectorizedSignal",
+    "SignalGenerator"
 ]

@@ -9,6 +9,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any
 
+import pandas as pd
 from loguru import logger
 
 # 配置日志输出到控制台
@@ -591,8 +592,9 @@ def create_main_parser():
     optimize_parser.add_argument("--ts_code", required=True, help="股票代码")
     optimize_parser.add_argument("--start_date", default="20200101", help="开始日期")
     optimize_parser.add_argument("--end_date", default="20231231", help="结束日期")
-    optimize_parser.add_argument("--method", default="grid", choices=["grid", "random"], help="优化方法")
-    optimize_parser.add_argument("--n_iterations", type=int, default=50, help="随机搜索迭代次数")
+    optimize_parser.add_argument("--method", default="grid", choices=["grid", "random", "bayesian"], help="优化方法")
+    optimize_parser.add_argument("--n_iterations", type=int, default=50, help="迭代次数 (随机/贝叶斯搜索)")
+    optimize_parser.add_argument("--n_trials", type=int, default=50, help="贝叶斯优化试验次数")
 
     # ===== 回测命令 =====
     backtest_parser = subparsers.add_parser("backtest", help="运行回测")
@@ -623,6 +625,30 @@ def create_main_parser():
     compare_parser.add_argument("--start_date", default="20200101", help="开始日期")
     compare_parser.add_argument("--end_date", default="20231231", help="结束日期")
     compare_parser.add_argument("--workers", type=int, help="并发工作进程数")
+
+    # ===== 策略管理命令 =====
+    strategy_parser = subparsers.add_parser("strategy", help="策略管理")
+    strategy_subparsers = strategy_parser.add_subparsers(dest="strategy_command")
+
+    # strategy list
+    strategy_subparsers.add_parser("list", help="列出策略状态")
+
+    # strategy enable
+    enable_parser = strategy_subparsers.add_parser("enable", help="激活策略")
+    enable_parser.add_argument("--name", required=True, help="策略名称")
+
+    # strategy disable
+    disable_parser = strategy_subparsers.add_parser("disable", help="停用策略")
+    disable_parser.add_argument("--name", required=True, help="策略名称")
+    disable_parser.add_argument("--reason", default="", help="停用原因")
+
+    # ===== 批量回测命令 =====
+    batch_backtest_parser = subparsers.add_parser("batch-backtest", help="激活策略批量回测")
+    batch_backtest_parser.add_argument("--ts_code", required=True, help="股票代码")
+    batch_backtest_parser.add_argument("--start_date", default="20200101", help="开始日期")
+    batch_backtest_parser.add_argument("--end_date", default="20231231", help="结束日期")
+    batch_backtest_parser.add_argument("--workers", type=int, default=4, help="并发工作进程数")
+    batch_backtest_parser.add_argument("--show-details", action="store_true", help="显示详细结果")
 
     return parser
 
@@ -828,8 +854,13 @@ def main():
 
         if args.method == "grid":
             result = optimizer.grid_search(param_ranges)
-        else:
+        elif args.method == "random":
             result = optimizer.random_search(param_ranges, n_iterations=args.n_iterations)
+        elif args.method == "bayesian":
+            result = optimizer.bayesian_search(param_ranges, n_trials=args.n_trials)
+        else:
+            logger.error(f"未知优化方法：{args.method}")
+            return
 
         print(result.summary())
 
@@ -1020,6 +1051,134 @@ def main():
         if not results.empty:
             print(results.to_string(index=False))
         print("=" * 80)
+
+    elif args.command == "strategy":
+        # 策略管理
+        from quant_strategy.strategy import StrategyManager
+
+        manager = StrategyManager()
+
+        if args.strategy_command == "list":
+            print(manager.list_strategies(show_all=True))
+
+        elif args.strategy_command == "enable":
+            if manager.enable(args.name):
+                logger.info(f"策略 {args.name} 已激活")
+            else:
+                logger.error(f"策略 {args.name} 不存在")
+
+        elif args.strategy_command == "disable":
+            if manager.disable(args.name, args.reason):
+                logger.info(f"策略 {args.name} 已停用：{args.reason}")
+            else:
+                logger.error(f"策略 {args.name} 不存在")
+
+        elif args.strategy_command is None:
+            print(manager.list_strategies(show_all=True))
+
+    elif args.command == "batch-backtest":
+        # 批量回测激活的策略
+        if not ts_provider:
+            logger.error("请先设置 TUSHARE_TOKEN 环境变量")
+            return
+
+        from quant_strategy.strategy import (
+            DualMAStrategy, MomentumStrategy,
+            KDJStrategy, RSIStrategy, BOLLStrategy,
+            DMIStrategy, CCIStrategy, MACDStrategy, VolumePriceStrategy,
+            VolumeSentimentStrategy, FearGreedStrategy, OpenInterestStrategy,
+            StrategyManager
+        )
+        from quant_strategy.backtester import ParallelBacktester, BacktestConfig
+
+        # 获取激活的策略列表
+        manager = StrategyManager()
+        enabled_strategies = manager.get_enabled_strategies()
+
+        if not enabled_strategies:
+            logger.error("没有激活的策略，请先使用 strategy enable 命令激活策略")
+            return
+
+        logger.info(f"激活的策略：{', '.join(enabled_strategies)}")
+
+        # 策略映射
+        strategy_map = {
+            "dual_ma": DualMAStrategy,
+            "momentum": MomentumStrategy,
+            "kdj": KDJStrategy,
+            "rsi": RSIStrategy,
+            "boll": BOLLStrategy,
+            "dmi": DMIStrategy,
+            "cci": CCIStrategy,
+            "macd": MACDStrategy,
+            "volume_price": VolumePriceStrategy,
+            "volume_sentiment": VolumeSentimentStrategy,
+            "fear_greed": FearGreedStrategy,
+            "open_interest": OpenInterestStrategy
+        }
+
+        # 构建策略列表
+        strategies = []
+        for strat_name in enabled_strategies:
+            strategy_class = strategy_map.get(strat_name)
+            if strategy_class:
+                strategies.append((strategy_class, {}, strat_name))
+            else:
+                logger.warning(f"未知策略：{strat_name}，跳过")
+
+        if not strategies:
+            logger.error("没有有效的策略")
+            return
+
+        # 获取数据
+        logger.info(f"获取股票数据：{args.ts_code}")
+        data = ts_provider.get_daily_data(args.ts_code, args.start_date, args.end_date, adj="qfq")
+        if data.empty:
+            logger.error("获取数据失败")
+            return
+
+        logger.info(f"获取数据成功：{len(data)} 条记录")
+
+        # 执行多策略回测
+        backtester = ParallelBacktester(max_workers=args.workers, use_processes=False)
+        results = backtester.compare_strategies(
+            strategies=strategies,
+            data_dict={args.ts_code: data},
+            show_progress=True
+        )
+
+        # 显示结果
+        print("\n" + "=" * 80)
+        print("批量回测结果汇总")
+        print(f"股票代码：{args.ts_code}")
+        print(f"日期范围：{args.start_date} - {args.end_date}")
+        print("=" * 80)
+
+        if not results.empty:
+            # 按收益率排序
+            results = results.sort_values("total_return", ascending=False)
+            print(results.to_string(index=False))
+
+            # 汇总统计
+            print("\n" + "-" * 80)
+            print("统计摘要:")
+            print(f"  策略数量：{len(strategies)}")
+            print(f"  平均收益率：{results['total_return'].mean():.2%}")
+            print(f"  平均夏普比率：{results['sharpe_ratio'].mean():.2f}")
+            print(f"  平均最大回撤：{results['max_drawdown'].mean():.2%}")
+            print(f"  最佳策略：{results.iloc[0]['strategy']} ({results.iloc[0]['total_return']:.2%})")
+            print(f"  最差策略：{results.iloc[-1]['strategy']} ({results.iloc[-1]['total_return']:.2%})")
+        else:
+            print("无有效回测结果")
+
+        print("=" * 80)
+
+        # 导出详细结果
+        if args.show_details:
+            output_file = Path("./output/reports") / f"batch_backtest_{args.ts_code}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+            results.to_csv(output_file, index=False, encoding='utf-8-sig')
+            logger.info(f"详细结果已保存到：{output_file}")
 
 
 if __name__ == "__main__":

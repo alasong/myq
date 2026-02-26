@@ -99,14 +99,14 @@ class Backtester:
             data: 股票数据 (包含 OHLCV)
             ts_code: 股票代码
             benchmark_data: 基准数据 (用于计算 alpha/beta)
-            
+
         Returns:
             BacktestResult: 回测结果
         """
         self.strategy = strategy
         self.data = data
         self.ts_code = ts_code or "UNKNOWN"
-        
+
         # 初始化券商
         self.broker = SimulatedBroker(
             initial_cash=self.config.initial_cash,
@@ -115,15 +115,22 @@ class Backtester:
 
         # 初始化策略
         self.strategy.init_position(self.config.initial_cash)
-        self.strategy.on_init(data)  # 调用策略初始化
+        
+        # 向量化策略预计算
+        if hasattr(self.strategy, 'precompute'):
+            logger.info(f"向量化策略预计算：{self.strategy.name}")
+            self.strategy.precompute(data)
+        # 调用策略初始化 (如果方法存在)
+        elif hasattr(self.strategy, 'on_init'):
+            self.strategy.on_init(data)
 
         # 回测主循环
         signals_log = []
         n_bars = len(data)
-        
+
         logger.info(f"开始回测：{self.ts_code}, {self.strategy.name}")
         logger.info(f"回测区间：{data.index[0]} - {data.index[-1]}, 共 {n_bars} 根 K 线")
-        
+
         for i in tqdm(range(len(data)), desc="回测中"):
             current_date = data.index[i]
             
