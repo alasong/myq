@@ -20,7 +20,9 @@ from quant_strategy.data import TushareDataProvider
 from quant_strategy.strategy import (
     DualMAStrategy, MomentumStrategy,
     KDJStrategy, RSIStrategy, BOLLStrategy,
-    DMIStrategy, CCIStrategy, MACDStrategy, VolumePriceStrategy
+    DMIStrategy, CCIStrategy, MACDStrategy, VolumePriceStrategy,
+    MarketBreadthStrategy, LimitUpStrategy, VolumeSentimentStrategy,
+    FearGreedStrategy, OpenInterestStrategy
 )
 from quant_strategy.backtester import Backtester, BacktestConfig
 from quant_strategy.analyzer import PerformanceAnalyzer, Visualizer
@@ -94,7 +96,12 @@ def run_backtest(config: Config):
         "dmi": DMIStrategy,
         "cci": CCIStrategy,
         "macd": MACDStrategy,
-        "volume_price": VolumePriceStrategy
+        "volume_price": VolumePriceStrategy,
+        "market_breadth": MarketBreadthStrategy,
+        "limit_up": LimitUpStrategy,
+        "volume_sentiment": VolumeSentimentStrategy,
+        "fear_greed": FearGreedStrategy,
+        "open_interest": OpenInterestStrategy
     }
 
     strategy_class = strategy_classes.get(strategy_name.lower())

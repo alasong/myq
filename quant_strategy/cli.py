@@ -21,10 +21,13 @@ def list_strategies():
     from quant_strategy.strategy import (
         DualMAStrategy, MomentumStrategy,
         KDJStrategy, RSIStrategy, BOLLStrategy,
-        DMIStrategy, CCIStrategy, MACDStrategy, VolumePriceStrategy
+        DMIStrategy, CCIStrategy, MACDStrategy, VolumePriceStrategy,
+        MarketBreadthStrategy, LimitUpStrategy, VolumeSentimentStrategy,
+        FearGreedStrategy, OpenInterestStrategy
     )
     
     strategies = {
+        # 经典策略
         "dual_ma": {
             "class": DualMAStrategy,
             "name": "双均线策略",
@@ -45,6 +48,7 @@ def list_strategies():
                 "rsi_overbought": {"type": float, "default": 70, "desc": "RSI 超买阈值"}
             }
         },
+        # 短线策略
         "kdj": {
             "class": KDJStrategy,
             "name": "KDJ 短线策略",
@@ -115,6 +119,58 @@ def list_strategies():
                 "vol_ratio": {"type": float, "default": 1.5, "desc": "放量倍数"},
                 "price_change": {"type": float, "default": 0.03, "desc": "价格变化阈值"}
             }
+        },
+        # 情绪策略
+        "market_breadth": {
+            "class": MarketBreadthStrategy,
+            "name": "市场广度策略",
+            "description": "基于涨跌比（ADR）的情绪指标",
+            "params": {
+                "lookback": {"type": int, "default": 20, "desc": "历史数据周期"},
+                "adr_period": {"type": int, "default": 5, "desc": "涨跌比移动平均周期"},
+                "high_threshold": {"type": float, "default": 2.0, "desc": "超买阈值"},
+                "low_threshold": {"type": float, "default": 0.5, "desc": "超卖阈值"}
+            },
+            "note": "需要全市场数据"
+        },
+        "limit_up": {
+            "class": LimitUpStrategy,
+            "name": "涨停情绪策略",
+            "description": "基于涨停家数占比判断市场情绪",
+            "params": {
+                "lookback": {"type": int, "default": 20, "desc": "历史数据周期"},
+                "high_threshold": {"type": float, "default": 0.05, "desc": "涨停占比高阈值"},
+                "low_threshold": {"type": float, "default": 0.01, "desc": "涨停占比低阈值"}
+            },
+            "note": "需要全市场数据"
+        },
+        "volume_sentiment": {
+            "class": VolumeSentimentStrategy,
+            "name": "成交量情绪策略",
+            "description": "基于成交量变化判断情绪",
+            "params": {
+                "vol_period": {"type": int, "default": 20, "desc": "成交量均线周期"},
+                "high_vol_ratio": {"type": float, "default": 2.0, "desc": "放量倍数"},
+                "low_vol_ratio": {"type": float, "default": 0.5, "desc": "缩量倍数"}
+            }
+        },
+        "fear_greed": {
+            "class": FearGreedStrategy,
+            "name": "恐惧贪婪策略",
+            "description": "综合多个情绪指标计算恐惧贪婪指数",
+            "params": {
+                "lookback": {"type": int, "default": 20, "desc": "历史数据周期"},
+                "rsi_period": {"type": int, "default": 14, "desc": "RSI 计算周期"}
+            }
+        },
+        "open_interest": {
+            "class": OpenInterestStrategy,
+            "name": "开盘情绪策略",
+            "description": "基于开盘价和跳空缺口判断情绪",
+            "params": {
+                "gap_threshold": {"type": float, "default": 0.02, "desc": "跳空阈值"},
+                "vol_period": {"type": int, "default": 20, "desc": "成交量均线周期"}
+            }
         }
     }
     
@@ -122,13 +178,21 @@ def list_strategies():
     print("可用策略列表")
     print("=" * 70)
     
-    for name, info in strategies.items():
-        print(f"\n[{info['name']}] ({name})")
-        print(f"   描述：{info['description']}")
-        print("   参数:")
-        for param_name, param_info in info['params'].items():
-            print(f"     - {param_name}: {param_info['desc']} "
-                  f"(类型:{param_info['type'].__name__}, 默认:{param_info['default']})")
+    print("\n【经典策略】")
+    for name in ["dual_ma", "momentum"]:
+        info = strategies[name]
+        print(f"  {name:16} - {info['name']}")
+    
+    print("\n【短线策略】")
+    for name in ["kdj", "rsi", "boll", "dmi", "cci", "macd", "volume_price"]:
+        info = strategies[name]
+        print(f"  {name:16} - {info['name']}")
+    
+    print("\n【情绪策略】")
+    for name in ["market_breadth", "limit_up", "volume_sentiment", "fear_greed", "open_interest"]:
+        info = strategies[name]
+        note = f" ({info['note']})" if "note" in info else ""
+        print(f"  {name:16} - {info['name']}{note}")
     
     print("\n" + "=" * 70)
     print(f"共 {len(strategies)} 个策略")
@@ -511,7 +575,8 @@ def create_main_parser():
     # data scan
     scan_parser = data_subparsers.add_parser("scan", help="策略扫描器")
     scan_parser.add_argument("--strategy", required=True, choices=[
-        "dual_ma", "momentum", "kdj", "rsi", "boll", "dmi", "cci", "macd", "volume_price"
+        "dual_ma", "momentum", "kdj", "rsi", "boll", "dmi", "cci", "macd",
+        "volume_price", "volume_sentiment", "fear_greed", "open_interest"
     ], help="策略名称")
     scan_parser.add_argument("--ts_codes", nargs="+", required=True, help="股票代码列表")
     scan_parser.add_argument("--start_date", required=True, help="开始日期 YYYYMMDD")
@@ -520,7 +585,8 @@ def create_main_parser():
     # ===== 优化命令 =====
     optimize_parser = subparsers.add_parser("optimize", help="参数优化")
     optimize_parser.add_argument("--strategy", required=True, choices=[
-        "dual_ma", "momentum", "kdj", "rsi", "boll", "dmi", "cci", "macd", "volume_price"
+        "dual_ma", "momentum", "kdj", "rsi", "boll", "dmi", "cci", "macd",
+        "volume_price", "volume_sentiment", "fear_greed", "open_interest"
     ], help="策略名称")
     optimize_parser.add_argument("--ts_code", required=True, help="股票代码")
     optimize_parser.add_argument("--start_date", default="20200101", help="开始日期")
@@ -634,6 +700,13 @@ def main():
                 DMIStrategy, CCIStrategy, MACDStrategy, VolumePriceStrategy
             )
 
+            from quant_strategy.strategy import (
+                DualMAStrategy, MomentumStrategy,
+                KDJStrategy, RSIStrategy, BOLLStrategy,
+                DMIStrategy, CCIStrategy, MACDStrategy, VolumePriceStrategy,
+                VolumeSentimentStrategy, FearGreedStrategy, OpenInterestStrategy
+            )
+
             strategy_map = {
                 "dual_ma": DualMAStrategy,
                 "momentum": MomentumStrategy,
@@ -643,7 +716,10 @@ def main():
                 "dmi": DMIStrategy,
                 "cci": CCIStrategy,
                 "macd": MACDStrategy,
-                "volume_price": VolumePriceStrategy
+                "volume_price": VolumePriceStrategy,
+                "volume_sentiment": VolumeSentimentStrategy,
+                "fear_greed": FearGreedStrategy,
+                "open_interest": OpenInterestStrategy
             }
             strategy_class = strategy_map.get(args.strategy)
 
@@ -663,7 +739,8 @@ def main():
         from quant_strategy.strategy import (
             DualMAStrategy, MomentumStrategy,
             KDJStrategy, RSIStrategy, BOLLStrategy,
-            DMIStrategy, CCIStrategy, MACDStrategy, VolumePriceStrategy
+            DMIStrategy, CCIStrategy, MACDStrategy, VolumePriceStrategy,
+            VolumeSentimentStrategy, FearGreedStrategy, OpenInterestStrategy
         )
         from quant_strategy.optimizer import ParamOptimizer, ParamRange
         from quant_strategy.backtester import BacktestConfig
@@ -677,7 +754,10 @@ def main():
             "dmi": DMIStrategy,
             "cci": CCIStrategy,
             "macd": MACDStrategy,
-            "volume_price": VolumePriceStrategy
+            "volume_price": VolumePriceStrategy,
+            "volume_sentiment": VolumeSentimentStrategy,
+            "fear_greed": FearGreedStrategy,
+            "open_interest": OpenInterestStrategy
         }
         strategy_class = strategy_map.get(args.strategy)
 
@@ -726,6 +806,18 @@ def main():
             "volume_price": [
                 ParamRange.range("vol_period", 3, 8),
                 ParamRange.range("vol_ratio", 1.2, 2.0)
+            ],
+            "volume_sentiment": [
+                ParamRange.range("vol_period", 15, 30),
+                ParamRange.range("high_vol_ratio", 1.5, 3.0)
+            ],
+            "fear_greed": [
+                ParamRange.range("lookback", 15, 30),
+                ParamRange.range("rsi_period", 10, 20)
+            ],
+            "open_interest": [
+                ParamRange.range("gap_threshold", 0.015, 0.03),
+                ParamRange.range("vol_period", 15, 25)
             ]
         }
         
@@ -774,7 +866,8 @@ def main():
         from quant_strategy.strategy import (
             DualMAStrategy, MomentumStrategy,
             KDJStrategy, RSIStrategy, BOLLStrategy,
-            DMIStrategy, CCIStrategy, MACDStrategy, VolumePriceStrategy
+            DMIStrategy, CCIStrategy, MACDStrategy, VolumePriceStrategy,
+            VolumeSentimentStrategy, FearGreedStrategy, OpenInterestStrategy
         )
         from quant_strategy.backtester import ParallelBacktester, BacktestConfig
 
@@ -787,7 +880,10 @@ def main():
             "dmi": DMIStrategy,
             "cci": CCIStrategy,
             "macd": MACDStrategy,
-            "volume_price": VolumePriceStrategy
+            "volume_price": VolumePriceStrategy,
+            "volume_sentiment": VolumeSentimentStrategy,
+            "fear_greed": FearGreedStrategy,
+            "open_interest": OpenInterestStrategy
         }
         strategy_class = strategy_map.get(args.strategy)
 
@@ -869,7 +965,8 @@ def main():
         from quant_strategy.strategy import (
             DualMAStrategy, MomentumStrategy,
             KDJStrategy, RSIStrategy, BOLLStrategy,
-            DMIStrategy, CCIStrategy, MACDStrategy, VolumePriceStrategy
+            DMIStrategy, CCIStrategy, MACDStrategy, VolumePriceStrategy,
+            VolumeSentimentStrategy, FearGreedStrategy, OpenInterestStrategy
         )
         from quant_strategy.backtester import ParallelBacktester, BacktestConfig
 
@@ -882,7 +979,10 @@ def main():
             "dmi": DMIStrategy,
             "cci": CCIStrategy,
             "macd": MACDStrategy,
-            "volume_price": VolumePriceStrategy
+            "volume_price": VolumePriceStrategy,
+            "volume_sentiment": VolumeSentimentStrategy,
+            "fear_greed": FearGreedStrategy,
+            "open_interest": OpenInterestStrategy
         }
 
         # 构建策略列表

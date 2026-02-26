@@ -10,6 +10,14 @@ from .short_term import (
     MACDStrategy,
     VolumePriceStrategy
 )
+from .sentiment import (
+    SentimentStrategy,
+    MarketBreadthStrategy,
+    LimitUpStrategy,
+    VolumeSentimentStrategy,
+    FearGreedStrategy,
+    OpenInterestStrategy
+)
 
 __all__ = [
     "BaseStrategy",
@@ -23,5 +31,11 @@ __all__ = [
     "DMIStrategy",
     "CCIStrategy",
     "MACDStrategy",
-    "VolumePriceStrategy"
+    "VolumePriceStrategy",
+    "SentimentStrategy",
+    "MarketBreadthStrategy",
+    "LimitUpStrategy",
+    "VolumeSentimentStrategy",
+    "FearGreedStrategy",
+    "OpenInterestStrategy"
 ]
