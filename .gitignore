@@ -41,11 +41,9 @@ data_cache/
 logs/
 *.log
 
-# 输出
-output/
-*.png
-*.html
-*.md
+# 输出（图表和报告）
+output/charts/
+output/reports/
 
 # 环境配置
 .env
