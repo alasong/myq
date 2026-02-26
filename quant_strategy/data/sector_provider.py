@@ -61,44 +61,48 @@ class SectorDataProvider:
     def get_concept_list(self) -> Optional[pd.DataFrame]:
         """
         获取概念板块列表
-        
+
         Returns:
             概念板块列表 DataFrame
         """
         if self._concept_cache is not None:
             return self._concept_cache
-        
+
         if not self.pro:
             logger.warning("未配置 Tushare token，无法获取概念数据")
             return pd.DataFrame()
-        
+
         try:
-            # 获取概念板块
-            df = self.pro.concept(
-                fields="ts_code,name,src"
+            # 获取全部股票的概念映射，然后提取唯一概念列表
+            df = self.pro.stock_concept(
+                fields="ts_code,concept_code,concept_name"
             )
+            if df is not None and not df.empty:
+                # 提取唯一概念
+                df = df[['concept_code', 'concept_name']].drop_duplicates()
+                df = df.rename(columns={'concept_code': 'ts_code', 'concept_name': 'name'})
             self._concept_cache = df
             return df
         except Exception as e:
             logger.error(f"获取概念列表失败：{e}")
             return pd.DataFrame()
-    
-    def get_industry_stocks(self, industry_code: str = None, 
+
+    def get_industry_stocks(self, industry_code: str = None,
                            industry_name: str = None) -> Optional[pd.DataFrame]:
         """
         获取某行业包含的股票
-        
+
         Args:
             industry_code: 行业代码
             industry_name: 行业名称
-            
+
         Returns:
             行业内股票列表 DataFrame
         """
         if not self.pro:
             logger.warning("未配置 Tushare token")
             return pd.DataFrame()
-        
+
         try:
             # 先获取行业成分
             if industry_code:
@@ -115,43 +119,47 @@ class SectorDataProvider:
                     if not match.empty:
                         industry_code = match.iloc[0]["ts_code"]
                         return self.get_industry_stocks(industry_code=industry_code)
-            
+
             return pd.DataFrame()
         except Exception as e:
             logger.error(f"获取行业成分股失败：{e}")
             return pd.DataFrame()
-    
+
     def get_concept_stocks(self, concept_code: str = None,
                           concept_name: str = None) -> Optional[pd.DataFrame]:
         """
         获取某概念包含的股票
-        
+
         Args:
             concept_code: 概念代码
             concept_name: 概念名称
-            
+
         Returns:
             概念内股票列表 DataFrame
         """
         if not self.pro:
             logger.warning("未配置 Tushare token")
             return pd.DataFrame()
-        
+
         try:
-            if concept_code:
-                df = self.pro.concept_detail(
-                    ts_code=concept_code,
-                    fields="ts_code,name,weight,in_date"
-                )
-                return df
-            elif concept_name:
-                # 根据名称查找概念代码
-                concepts = self.get_concept_list()
-                if concepts is not None and not concepts.empty:
-                    match = concepts[concepts["name"] == concept_name]
-                    if not match.empty:
-                        concept_code = match.iloc[0]["ts_code"]
-                        return self.get_concept_stocks(concept_code=concept_code)
+            # 获取全部股票的概念映射
+            df = self.pro.stock_concept(
+                fields="ts_code,concept_code,concept_name"
+            )
+            
+            if df is None or df.empty:
+                return pd.DataFrame()
+            
+            # 根据名称或代码筛选
+            if concept_name:
+                df = df[df["concept_name"] == concept_name]
+            elif concept_code:
+                df = df[df["concept_code"] == concept_code]
+            
+            if not df.empty:
+                # 返回股票列表
+                result = df[["ts_code", "concept_name"]].drop_duplicates()
+                return result
             
             return pd.DataFrame()
         except Exception as e:

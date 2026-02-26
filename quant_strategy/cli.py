@@ -26,7 +26,11 @@ def list_strategies():
         MarketBreadthStrategy, LimitUpStrategy, VolumeSentimentStrategy,
         FearGreedStrategy, OpenInterestStrategy
     )
-    
+    from quant_strategy.strategy import (
+        SectorMomentumRotationStrategy, SectorFlowStrategy,
+        FirstLimitUpStrategy, ContinuousLimitUpStrategy, LimitUpPullbackStrategy
+    )
+
     strategies = {
         # 经典策略
         "dual_ma": {
@@ -172,33 +176,98 @@ def list_strategies():
                 "gap_threshold": {"type": float, "default": 0.02, "desc": "跳空阈值"},
                 "vol_period": {"type": int, "default": 20, "desc": "成交量均线周期"}
             }
+        },
+        # 板块轮动策略
+        "sector_momentum": {
+            "class": SectorMomentumRotationStrategy,
+            "name": "板块动量轮动策略",
+            "description": "基于板块动量排名进行轮动交易",
+            "params": {
+                "lookback": {"type": int, "default": 20, "desc": "动量计算周期"},
+                "top_k": {"type": int, "default": 3, "desc": "选择板块数量"},
+                "rebalance_days": {"type": int, "default": 5, "desc": "调仓周期"}
+            },
+            "note": "需要板块数据"
+        },
+        "sector_flow": {
+            "class": SectorFlowStrategy,
+            "name": "板块资金流向策略",
+            "description": "跟随主力资金流向进行板块配置",
+            "params": {
+                "flow_lookback": {"type": int, "default": 5, "desc": "资金流计算周期"},
+                "top_k": {"type": int, "default": 3, "desc": "选择板块数量"}
+            },
+            "note": "需要板块数据"
+        },
+        # 打板策略
+        "first_limit_up": {
+            "class": FirstLimitUpStrategy,
+            "name": "首板打板策略",
+            "description": "识别首次涨停股票，次日高开时买入",
+            "params": {
+                "min_close_ratio": {"type": float, "default": 0.095, "desc": "涨停阈值"},
+                "min_volume_ratio": {"type": float, "default": 1.5, "desc": "最小放量倍数"},
+                "hold_days": {"type": int, "default": 3, "desc": "最大持有期"},
+                "stop_loss": {"type": float, "default": 0.05, "desc": "止损比例"},
+                "take_profit": {"type": float, "default": 0.15, "desc": "止盈比例"}
+            }
+        },
+        "continuous_limit_up": {
+            "class": ContinuousLimitUpStrategy,
+            "name": "连板打板策略",
+            "description": "捕捉 N 连板股票，博弈继续涨停",
+            "params": {
+                "target_continuous": {"type": int, "default": 2, "desc": "目标连板数"},
+                "max_hold_days": {"type": int, "default": 5, "desc": "最大持有期"}
+            }
+        },
+        "limit_up_pullback": {
+            "class": LimitUpPullbackStrategy,
+            "name": "涨停回马枪策略",
+            "description": "博弈涨停股回调后的第二波拉升",
+            "params": {
+                "limit_up_lookback": {"type": int, "default": 10, "desc": "涨停回溯期"},
+                "pullback_days": {"type": int, "default": 5, "desc": "回调天数"},
+                "hold_days": {"type": int, "default": 5, "desc": "持有期"}
+            }
         }
     }
     
     print("\n" + "=" * 70)
     print("可用策略列表")
     print("=" * 70)
-    
+
     print("\n【经典策略】")
     for name in ["dual_ma", "momentum"]:
         info = strategies[name]
         print(f"  {name:16} - {info['name']}")
-    
+
     print("\n【短线策略】")
     for name in ["kdj", "rsi", "boll", "dmi", "cci", "macd", "volume_price"]:
         info = strategies[name]
         print(f"  {name:16} - {info['name']}")
-    
+
     print("\n【情绪策略】")
     for name in ["market_breadth", "limit_up", "volume_sentiment", "fear_greed", "open_interest"]:
         info = strategies[name]
         note = f" ({info['note']})" if "note" in info else ""
         print(f"  {name:16} - {info['name']}{note}")
-    
+
+    print("\n【板块轮动策略】")
+    for name in ["sector_momentum", "sector_flow"]:
+        info = strategies[name]
+        note = f" ({info['note']})" if "note" in info else ""
+        print(f"  {name:16} - {info['name']}{note}")
+
+    print("\n【打板策略】")
+    for name in ["first_limit_up", "continuous_limit_up", "limit_up_pullback"]:
+        info = strategies[name]
+        print(f"  {name:16} - {info['name']}")
+
     print("\n" + "=" * 70)
     print(f"共 {len(strategies)} 个策略")
     print("=" * 70)
-    
+
     return list(strategies.keys())
 
 
@@ -663,19 +732,27 @@ def main():
         return
 
     # 导入数据提供者
-    from quant_strategy.data import TushareDataProvider
+    from quant_strategy.data import create_data_provider, MultiSourceDataProvider
     from quant_strategy.config import Config
 
     # 加载配置
     config = Config()
     config.data_source.token = config.data_source.token or os.getenv("TUSHARE_TOKEN", "")
 
+    # 创建数据提供者（支持多数据源自动切换）
     ts_provider = None
-    if config.data_source.token:
-        ts_provider = TushareDataProvider(
-            token=config.data_source.token,
-            use_cache=config.data_source.use_cache
+    data_source_type = os.getenv("DATA_SOURCE", "auto")  # 可通过环境变量配置
+    
+    try:
+        ts_provider = create_data_provider(
+            source=data_source_type,
+            tushare_token=config.data_source.token,
+            use_cache=config.data_source.use_cache,
+            cache_dir=config.data_source.cache_dir
         )
+        logger.info(f"数据提供者初始化：{data_source_type}")
+    except Exception as e:
+        logger.error(f"数据提供者初始化失败：{e}")
 
     # 处理命令
     if args.command == "strategies":

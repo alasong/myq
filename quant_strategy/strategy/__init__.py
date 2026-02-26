@@ -2,13 +2,21 @@ from .base_strategy import BaseStrategy, Signal, SignalType
 from .ma_strategy import DualMAStrategy
 from .momentum_strategy import MomentumStrategy
 from .short_term import (
+    KDJStrategy as KDJStrategyLegacy,
+    RSIStrategy as RSIStrategyLegacy,
+    BOLLStrategy as BOLLStrategyLegacy,
+    DMIStrategy as DMIStrategyLegacy,
+    CCIStrategy as CCIStrategyLegacy,
+    MACDStrategy as MACDStrategyLegacy,
+    VolumePriceStrategy
+)
+from .short_term_vectorized import (
     KDJStrategy,
     RSIStrategy,
     BOLLStrategy,
     DMIStrategy,
     CCIStrategy,
-    MACDStrategy,
-    VolumePriceStrategy
+    MACDStrategy
 )
 from .sentiment import (
     SentimentStrategy,
@@ -21,6 +29,12 @@ from .sentiment import (
 from .strategy_manager import StrategyManager, StrategyStatus
 from .indicators import TechnicalIndicators, IndicatorCache, get_indicators, clear_indicator_cache
 from .vectorized_strategy import VectorizedStrategy, VectorizedSignal, SignalGenerator
+from .sector_rotation import SectorMomentumRotationStrategy, SectorFlowStrategy
+from .limit_up_strategy import (
+    FirstLimitUpStrategy,
+    ContinuousLimitUpStrategy,
+    LimitUpPullbackStrategy
+)
 
 __all__ = [
     "BaseStrategy",
@@ -49,5 +63,10 @@ __all__ = [
     "clear_indicator_cache",
     "VectorizedStrategy",
     "VectorizedSignal",
-    "SignalGenerator"
+    "SignalGenerator",
+    "SectorMomentumRotationStrategy",
+    "SectorFlowStrategy",
+    "FirstLimitUpStrategy",
+    "ContinuousLimitUpStrategy",
+    "LimitUpPullbackStrategy"
 ]
