@@ -112,10 +112,11 @@ class Backtester:
             initial_cash=self.config.initial_cash,
             slippage_rate=self.config.slippage_rate
         )
-        
+
         # 初始化策略
         self.strategy.init_position(self.config.initial_cash)
-        
+        self.strategy.on_init(data)  # 调用策略初始化
+
         # 回测主循环
         signals_log = []
         n_bars = len(data)
