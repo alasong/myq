@@ -17,23 +17,31 @@ from .data_cache import DataCache
 class TushareDataProvider:
     """Tushare 数据提供者"""
     
-    def __init__(self, token: str = None, use_cache: bool = True):
+    def __init__(self, token: str = None, use_cache: bool = True,
+                 cache_dir: str = "./data_cache", compression: str = "gzip"):
         """
         初始化数据提供者
-        
+
         Args:
             token: Tushare API token，如为 None 则从环境变量读取
             use_cache: 是否启用本地缓存
+            cache_dir: 缓存目录
+            compression: 缓存压缩方式 (none/snappy/gzip/brotli/zstd)
         """
         self.token = token or os.getenv("TUSHARE_TOKEN")
         if not self.token:
             raise ValueError("请提供 Tushare token 或设置 TUSHARE_TOKEN 环境变量")
-        
+
         ts.set_token(self.token)
         self.pro = ts.pro_api()
         self.use_cache = use_cache
-        self.cache = DataCache() if use_cache else None
         
+        # 初始化缓存（支持压缩）
+        self.cache = DataCache(
+            cache_dir=cache_dir,
+            compression=compression  # 使用压缩
+        ) if use_cache else None
+
         logger.info("Tushare 数据提供者初始化成功")
     
     def get_trade_cal(self, exchange: str = "SSE", start_date: str = None,

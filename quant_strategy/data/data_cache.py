@@ -22,7 +22,8 @@ class DataCache:
 
     def __init__(self, cache_dir: str = "./data_cache",
                  max_size_mb: float = 1024,
-                 ttl_days: int = 30):
+                 ttl_days: int = 30,
+                 compression: str = "gzip"):
         """
         初始化数据缓存
 
@@ -30,6 +31,7 @@ class DataCache:
             cache_dir: 缓存目录
             max_size_mb: 最大缓存大小 (MB)
             ttl_days: 缓存 TTL (天)
+            compression: 压缩方式 (none/snappy/gzip/brotli/zstd)
         """
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -39,7 +41,8 @@ class DataCache:
         # 缓存配置
         self.max_size_mb = max_size_mb
         self.ttl_days = ttl_days
-        
+        self.compression = compression  # 压缩算法
+
         # 数据完整性配置
         self.completeness_check = True  # 是否检查数据完整性
 
@@ -352,7 +355,11 @@ class DataCache:
         cache_path = self.cache_dir / filename
 
         try:
-            df.to_parquet(cache_path, index=False)
+            # 使用指定的压缩算法保存 Parquet
+            # compression 选项：None, 'snappy', 'gzip', 'brotli', 'zstd'
+            compression_opts = self.compression if self.compression != 'none' else None
+            
+            df.to_parquet(cache_path, index=False, compression=compression_opts)
 
             # 计算记录数
             record_count = len(df)
