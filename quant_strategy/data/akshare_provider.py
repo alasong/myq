@@ -2,12 +2,20 @@
 AKShare 数据提供者模块
 完全免费的开源金融数据接口
 https://akshare.akfamily.xyz/
+
+注意：AKShare 依赖第三方网站 API，可能存在稳定性问题
+建议：
+1. 启用缓存减少 API 调用
+2. 使用多数据源自动切换
+3. 重要场景建议使用 Tushare 付费服务
 """
 import os
 import pandas as pd
 from datetime import datetime
 from typing import Optional, List
 from loguru import logger
+import time
+import random
 
 from .data_cache import DataCache
 
@@ -15,21 +23,29 @@ from .data_cache import DataCache
 class AKShareDataProvider:
     """AKShare 数据提供者"""
 
-    def __init__(self, use_cache: bool = True, cache_dir: str = "./data_cache"):
+    def __init__(self, use_cache: bool = True, cache_dir: str = "./data_cache",
+                 max_retries: int = 3, retry_delay: float = 1.0):
         """
         初始化 AKShare 数据提供者
 
         Args:
             use_cache: 是否启用本地缓存
             cache_dir: 缓存目录
+            max_retries: 最大重试次数
+            retry_delay: 重试延迟（秒）
         """
         self.use_cache = use_cache
         self.cache = DataCache(cache_dir) if use_cache else None
+        
+        # 重试配置
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
         
         # 延迟导入 akshare（避免不必要的依赖）
         self._ak = None
         
         logger.info("AKShare 数据提供者初始化成功")
+        logger.warning("AKShare 依赖第三方 API，稳定性有限，建议启用缓存或使用多数据源")
 
     @property
     def ak(self):
@@ -89,36 +105,50 @@ class AKShareDataProvider:
                 logger.debug(f"AKShare 缓存命中：{ts_code}")
                 return cached
 
-        try:
-            # 转换股票代码格式
-            symbol = self._convert_ts_code(ts_code)
-            
-            # 转换日期格式
-            start_str = self._format_date(start_date)
-            end_str = self._format_date(end_date)
-            
-            # 获取数据 - 使用 AKShare 的 stock_zh_a_hist 接口
-            df = self.ak.stock_zh_a_hist(
-                symbol=symbol,
-                period="daily",
-                start_date=start_str.replace('-', ''),
-                end_date=end_str.replace('-', ''),
-                adjust=adj
-            )
-            
-            # 数据格式转换
-            df = self._process_daily(df, ts_code)
-            
-            # 保存到缓存
-            if self.use_cache and df is not None and not df.empty:
-                params = {"ts_code": ts_code, "start": start_date, "end": end_date, "adj": adj}
-                self.cache.set("daily_ak", params, df)
-            
-            return df
-            
-        except Exception as e:
-            logger.error(f"AKShare 获取日线数据失败 {ts_code}: {e}")
-            return pd.DataFrame()
+        # 重试逻辑
+        last_error = None
+        for attempt in range(self.max_retries):
+            try:
+                # 随机延迟，避免请求过于集中
+                if attempt > 0:
+                    delay = self.retry_delay * attempt + random.uniform(0, 0.5)
+                    logger.warning(f"获取数据失败，{delay:.1f}秒后重试 ({attempt+1}/{self.max_retries})")
+                    time.sleep(delay)
+                
+                # 转换股票代码格式
+                symbol = self._convert_ts_code(ts_code)
+                
+                # 转换日期格式
+                start_str = self._format_date(start_date)
+                end_str = self._format_date(end_date)
+                
+                # 获取数据 - 使用 AKShare 的 stock_zh_a_hist 接口
+                df = self.ak.stock_zh_a_hist(
+                    symbol=symbol,
+                    period="daily",
+                    start_date=start_str.replace('-', ''),
+                    end_date=end_str.replace('-', ''),
+                    adjust=adj
+                )
+                
+                # 数据格式转换
+                df = self._process_daily(df, ts_code)
+                
+                # 保存到缓存
+                if self.use_cache and df is not None and not df.empty:
+                    params = {"ts_code": ts_code, "start": start_date, "end": end_date, "adj": adj}
+                    self.cache.set("daily_ak", params, df)
+                
+                return df
+                
+            except Exception as e:
+                last_error = e
+                logger.error(f"AKShare 获取日线数据失败 {ts_code} (尝试{attempt+1}/{self.max_retries}): {e}")
+                continue
+        
+        # 所有重试失败
+        logger.error(f"AKShare 获取日线数据失败 {ts_code}，已重试{self.max_retries}次")
+        return pd.DataFrame()
 
     def _format_date(self, date_str: str) -> str:
         """

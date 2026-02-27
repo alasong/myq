@@ -80,6 +80,18 @@ class BacktestConfigLoader:
         """
         path = Path(path)
         
+        # 如果是相对路径，从当前工作目录查找
+        if not path.is_absolute():
+            # 首先尝试当前工作目录
+            if not path.exists():
+                # 然后尝试项目根目录
+                project_root = Path(__file__).parent.parent.parent
+                alt_path = project_root / path
+                if alt_path.exists():
+                    path = alt_path
+                else:
+                    raise FileNotFoundError(f"配置文件不存在：{path}")
+        
         if not path.exists():
             raise FileNotFoundError(f"配置文件不存在：{path}")
         

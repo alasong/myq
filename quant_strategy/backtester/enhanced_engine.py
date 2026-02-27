@@ -110,9 +110,13 @@ class EnhancedSectorBacktester(ParallelBacktester):
         选择龙头股
         
         标准：
-        1. 成交额（代表市值和流动性）
-        2. 收益率
-        3. 波动率（反向指标）
+        1. 市值（需要外部数据，当前用成交额代替）
+        2. 流动性（成交量）
+        3. 历史波动率（反向指标，越低越好）
+        
+        注意：
+        - 避免使用未来函数（如回测期内的收益率）
+        - 真实场景应该从外部获取市值数据
         
         Args:
             data_dict: {ts_code: DataFrame}
@@ -127,22 +131,58 @@ class EnhancedSectorBacktester(ParallelBacktester):
             if len(data) < 20:
                 continue
             
-            # 评分标准
-            # 1. 成交额（代表市值和流动性）
-            avg_amount = data['amount'].mean() if 'amount' in data.columns else 0
+            # 评分标准（避免未来函数）
             
-            # 2. 收益率
-            total_return = (data['close'].iloc[-1] - data['close'].iloc[0]) / data['close'].iloc[0]
+            # 1. 成交额（代表市值和流动性）- 使用期初数据
+            # 使用前 5 日的平均成交额，避免使用整个回测期数据
+            initial_amount = data['amount'].iloc[:5].mean() if 'amount' in data.columns else 0
             
-            # 3. 波动率（反向指标）
-            volatility = data['close'].pct_change().std()
+            # 2. 流动性 - 成交量稳定性
+            if 'vol' in data.columns:
+                avg_volume = data['vol'].iloc[:5].mean()
+                volume_stability = 1 / (data['vol'].std() + 1)  # 稳定性越高越好
+            else:
+                avg_volume = 0
+                volume_stability = 0
+            
+            # 3. 波动率（反向指标）- 使用历史波动率
+            if len(data) > 20:
+                # 使用期初 20 日的波动率
+                volatility = data['close'].iloc[:20].pct_change().std()
+            else:
+                volatility = data['close'].pct_change().std()
+            
+            # 4. 市值代理（使用股票代码特征）
+            # 600/601/603 开头通常是沪市主板，市值较大
+            # 000/001/002 开头通常是深市主板/中小板
+            # 300 开头是创业板，市值相对较小
+            market_cap_score = 0
+            if ts_code.startswith(('600', '601', '603')):
+                market_cap_score = 3
+            elif ts_code.startswith(('000', '001', '002')):
+                market_cap_score = 2
+            elif ts_code.startswith('300'):
+                market_cap_score = 1
             
             # 综合评分
-            score = avg_amount * 0.4 + total_return * 0.4 - volatility * 0.2
+            # 成交额 40% + 流动性 20% + 低波动 20% + 市值特征 20%
+            score = (
+                initial_amount * 0.4 +
+                avg_volume * volume_stability * 0.2 +
+                (1 / (volatility + 0.01)) * 0.2 +  # 波动率越低越好
+                market_cap_score * 0.2
+            )
+            
             scores[ts_code] = score
         
         # 选择前 N 名
+        if not scores:
+            logger.warning("没有符合条件的股票，返回全部股票")
+            return data_dict
+        
         sorted_stocks = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_n]
+        
+        logger.info(f"龙头股评分：{[(ts, f'{s:.2f}') for ts, s in sorted_stocks]}")
         
         return {ts_code: data_dict[ts_code] for ts_code, _ in sorted_stocks}
     

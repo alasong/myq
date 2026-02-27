@@ -5,6 +5,7 @@
 - TTL 过期检查
 - LRU 淘汰策略
 - 缓存大小限制
+- 数据完整性标志（新增）
 """
 import os
 import pandas as pd
@@ -18,12 +19,12 @@ from collections import OrderedDict
 class DataCache:
     """本地数据缓存管理"""
 
-    def __init__(self, cache_dir: str = "./data_cache", 
-                 max_size_mb: float = 1024, 
+    def __init__(self, cache_dir: str = "./data_cache",
+                 max_size_mb: float = 1024,
                  ttl_days: int = 30):
         """
         初始化数据缓存
-        
+
         Args:
             cache_dir: 缓存目录
             max_size_mb: 最大缓存大小 (MB)
@@ -33,15 +34,18 @@ class DataCache:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_file = self.cache_dir / "metadata.csv"
         self._metadata = self._load_metadata()
-        
+
         # 缓存配置
         self.max_size_mb = max_size_mb
         self.ttl_days = ttl_days
         
+        # 数据完整性配置
+        self.completeness_check = True  # 是否检查数据完整性
+
         # LRU 访问记录
         self._access_log = OrderedDict()
         self._load_access_log()
-        
+
         # 内存缓存统计
         self._stats = {
             "hits": 0,
@@ -53,7 +57,7 @@ class DataCache:
         """加载缓存元数据"""
         if self.metadata_file.exists():
             return pd.read_csv(self.metadata_file)
-        return pd.DataFrame(columns=["key", "path", "updated_at", "start_date", "end_date", "data_type", "ts_code"])
+        return pd.DataFrame(columns=["key", "path", "updated_at", "start_date", "end_date", "data_type", "ts_code", "is_complete", "record_count"])
 
     def _save_metadata(self):
         """保存缓存元数据"""
@@ -158,7 +162,8 @@ class DataCache:
                 pass
         return total_size / 1024 / 1024
 
-    def get(self, data_type: str, params: dict, start_date: str = None, end_date: str = None) -> pd.DataFrame | None:
+    def get(self, data_type: str, params: dict, start_date: str = None, end_date: str = None,
+            expected_days: int = None) -> pd.DataFrame | None:
         """
         从缓存获取数据
 
@@ -167,6 +172,7 @@ class DataCache:
             params: 查询参数
             start_date: 开始日期
             end_date: 结束日期
+            expected_days: 预期数据天数（用于完整性检查）
 
         Returns:
             缓存的数据，如果不存在或过期则返回 None
@@ -178,19 +184,37 @@ class DataCache:
             self._stats["misses"] += 1
             return None
 
+        row = cache_entry.iloc[0]
+        
         # 检查 TTL
-        updated_at = cache_entry.iloc[0]["updated_at"]
+        updated_at = row["updated_at"]
         if self._check_ttl_expired(updated_at):
             logger.debug(f"缓存过期：{key} (已 {self._get_cache_age_days(updated_at):.1f} 天)")
-            self._delete_cache_entry(cache_entry.iloc[0])
+            self._delete_cache_entry(row)
             self._stats["misses"] += 1
             return None
-        
-        cache_path = Path(cache_entry.iloc[0]["path"])
+
+        cache_path = Path(row["path"])
         if not cache_path.exists():
             self._stats["misses"] += 1
             return None
 
+        # 检查数据完整性（如果标记为完整）
+        is_complete = row.get("is_complete", False) if "is_complete" in cache_entry.columns else False
+        
+        if is_complete:
+            # 完整数据，直接返回，不再验证日期范围
+            logger.debug(f"缓存命中（完整数据）：{key}")
+            self._stats["hits"] += 1
+            self._update_access_log(key)
+            try:
+                return pd.read_parquet(cache_path)
+            except Exception as e:
+                logger.warning(f"读取缓存失败：{e}")
+                self._stats["misses"] += 1
+                return None
+
+        # 非完整数据，需要验证
         try:
             df = pd.read_parquet(cache_path) if cache_path.suffix == ".parquet" else pd.read_csv(cache_path)
 
@@ -201,6 +225,18 @@ class DataCache:
                 if mask.sum() == 0:
                     self._stats["misses"] += 1
                     return None
+                
+                # 如果有预期天数，检查数据完整性
+                if expected_days and self.completeness_check:
+                    actual_days = mask.sum()
+                    completeness = actual_days / expected_days
+                    if completeness < 0.9:  # 少于 90% 认为不完整
+                        logger.debug(f"缓存数据不完整：{key} (期望{expected_days}天，实际{actual_days}天，完整度{completeness:.1%})")
+                        self._stats["misses"] += 1
+                        return None
+                    elif completeness >= 0.95:
+                        # 标记为完整数据
+                        self._mark_as_complete(key, actual_days)
 
             logger.debug(f"缓存命中：{key}")
             self._stats["hits"] += 1
@@ -210,8 +246,23 @@ class DataCache:
             logger.warning(f"读取缓存失败：{e}")
             self._stats["misses"] += 1
             return None
+    
+    def _mark_as_complete(self, key: str, record_count: int):
+        """
+        标记缓存数据为完整
+        
+        Args:
+            key: 缓存键
+            record_count: 记录数
+        """
+        mask = self._metadata["key"] == key
+        if mask.any():
+            self._metadata.loc[mask, "is_complete"] = True
+            self._metadata.loc[mask, "record_count"] = record_count
+            self._save_metadata()
+            logger.debug(f"标记缓存为完整数据：{key} ({record_count}条记录)")
 
-    def set(self, data_type: str, params: dict, df: pd.DataFrame):
+    def set(self, data_type: str, params: dict, df: pd.DataFrame, is_complete: bool = False):
         """
         保存数据到缓存
 
@@ -219,10 +270,11 @@ class DataCache:
             data_type: 数据类型
             params: 查询参数
             df: 要缓存的 DataFrame
+            is_complete: 是否标记为完整数据
         """
         # 先执行 LRU 淘汰，确保有空间
         self._enforce_size_limit()
-        
+
         key = self._generate_key(data_type, params)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{key}_{timestamp}.parquet"
@@ -230,6 +282,9 @@ class DataCache:
 
         try:
             df.to_parquet(cache_path, index=False)
+
+            # 计算记录数
+            record_count = len(df)
 
             # 更新元数据
             new_entry = pd.DataFrame([{
@@ -239,16 +294,18 @@ class DataCache:
                 "start_date": df["trade_date"].min() if "trade_date" in df.columns else None,
                 "end_date": df["trade_date"].max() if "trade_date" in df.columns else None,
                 "data_type": data_type,
-                "ts_code": params.get("ts_code", "")
+                "ts_code": params.get("ts_code", ""),
+                "is_complete": is_complete,
+                "record_count": record_count
             }])
 
             self._metadata = pd.concat([self._metadata, new_entry], ignore_index=True)
             self._save_metadata()
-            
+
             # 更新 LRU 访问
             self._update_access_log(key)
-            
-            logger.debug(f"缓存保存：{key} -> {cache_path}")
+
+            logger.debug(f"缓存保存：{key} -> {cache_path} ({record_count}条记录，完整={is_complete})")
         except Exception as e:
             logger.error(f"保存缓存失败：{e}")
     

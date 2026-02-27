@@ -685,7 +685,7 @@ def create_main_parser():
 
     # ===== 板块/组合回测命令 =====
     sector_backtest_parser = subparsers.add_parser("sector-backtest", help="板块/组合回测")
-    sector_backtest_parser.add_argument("--strategy", required=True, help="策略名称")
+    sector_backtest_parser.add_argument("--strategy", required=False, help="策略名称（可从配置文件加载）")
     sector_backtest_parser.add_argument("--sector_type", choices=["industry", "concept", "area", "custom"],
                                         help="板块类型")
     sector_backtest_parser.add_argument("--sector_name", help="板块名称")
@@ -1072,11 +1072,15 @@ def main():
             end_date = bt_config.end_date
             mode = bt_config.mode
             top_n = bt_config.top_n
-            workers = bt_config.workers
+            workers = bt_config.workers or args.workers
             use_processes = bt_config.use_processes
             strategy_params = bt_config.strategy_params
             logger.info(f"已从配置文件加载：{args.config}")
         else:
+            # 从命令行参数获取
+            if not args.strategy:
+                logger.error("请提供 --strategy 参数或使用 --config 配置文件")
+                return
             strategy_name = args.strategy
             ts_codes = args.ts_codes
             sector_type = args.sector_type

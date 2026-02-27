@@ -71,24 +71,30 @@ class TushareDataProvider:
                        adj: str = "qfq") -> pd.DataFrame:
         """
         获取股票日线数据
-        
+
         Args:
             ts_code: 股票代码，如 "000001.SZ"
             start_date: 开始日期 YYYYMMDD
             end_date: 结束日期 YYYYMMDD
             adj: 复权类型 qfq(前复权)/hfq(后复权)/None(不复权)
-            
+
         Returns:
             包含 open, high, low, close, vol, amount 等字段的 DataFrame
         """
         params = {"ts_code": ts_code, "start": start_date, "end": end_date, "adj": adj}
         cache_key_params = params.copy()
-        
+
+        # 计算预期交易日天数（约 250 天/年）
+        start_dt = pd.to_datetime(start_date, format='%Y%m%d')
+        end_dt = pd.to_datetime(end_date, format='%Y%m%d')
+        expected_days = int(((end_dt - start_dt).days * 250 / 365) * 0.95)  # 95% 容错
+
         if self.use_cache:
-            cached = self.cache.get("daily", cache_key_params, start_date, end_date)
+            cached = self.cache.get("daily", cache_key_params, start_date, end_date, expected_days=expected_days)
             if cached is not None:
+                logger.debug(f"缓存命中（完整数据）：{ts_code}")
                 return cached
-        
+
         try:
             if adj:
                 # 获取复权因子
@@ -108,12 +114,16 @@ class TushareDataProvider:
                     end_date=end_date,
                     fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount"
                 )
-            
+
             df = self._process_daily(df)
-            
+
             if self.use_cache:
-                self.cache.set("daily", cache_key_params, df)
-            
+                # 检查数据完整性
+                actual_days = len(df)
+                is_complete = actual_days >= expected_days
+                self.cache.set("daily", cache_key_params, df, is_complete=is_complete)
+                logger.info(f"获取数据：{ts_code} ({actual_days}天，完整={is_complete})")
+
             return df
         except Exception as e:
             logger.error(f"获取日线数据失败 {ts_code}: {e}")
