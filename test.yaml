@@ -10,11 +10,20 @@ ts_codes:
   - "300001.SZ"
   - "300002.SZ"
   - "300003.SZ"
+  - "000001.SZ"
+  - "000002.SZ"
+  - "600001.SH"
+  - "600002.SH"
 
 start_date: "20250101"
 end_date: "20251231"
 
-mode: individual
+# 回测模式：individual/portfolio/leaders
+mode: leaders
+
+# 龙头股数量（leaders 模式使用）
+top_n: 5
+
 workers: 4
 
-notes: "测试配置文件"
+notes: "测试配置文件 - 龙头股模式"

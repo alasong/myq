@@ -761,25 +761,25 @@ def main():
         return
 
     # 导入数据提供者
-    from quant_strategy.data import create_data_provider, MultiSourceDataProvider
+    from quant_strategy.data import create_data_provider
     from quant_strategy.config import Config
 
     # 加载配置
     config = Config()
     config.data_source.token = config.data_source.token or os.getenv("TUSHARE_TOKEN", "")
 
-    # 创建数据提供者（支持多数据源自动切换）
+    # 创建数据提供者（仅支持 Tushare）
     ts_provider = None
-    data_source_type = os.getenv("DATA_SOURCE", "auto")  # 可通过环境变量配置
-    
+    data_source_type = "tushare"  # 仅支持 Tushare
+
     try:
         ts_provider = create_data_provider(
             source=data_source_type,
-            tushare_token=config.data_source.token,
+            token=config.data_source.token,
             use_cache=config.data_source.use_cache,
             cache_dir=config.data_source.cache_dir
         )
-        logger.info(f"数据提供者初始化：{data_source_type}")
+        logger.info(f"数据提供者初始化：Tushare")
     except Exception as e:
         logger.error(f"数据提供者初始化失败：{e}")
 
@@ -1008,20 +1008,21 @@ def main():
         # 运行回测
         from quant_strategy.main import run_backtest
         from quant_strategy.analyzer import ReportExporter, BacktestHistory
-        from quant_strategy.config import BacktestConfigLoader
+        from quant_strategy.config import BacktestConfigLoader, Config
 
         # 从配置文件加载
         if args.config:
             config = BacktestConfigLoader.load(args.config)
             logger.info(f"已从配置文件加载：{args.config}")
         else:
-            config = type('obj', (object,), {
-                'strategy': type('obj', (object,), {'name': args.strategy, 'params': {}})(),
-                'ts_code': args.ts_code,
-                'start_date': args.start_date,
-                'end_date': args.end_date,
-                'backtest': type('obj', (object,), {'save_plot': args.save_plot})()
-            })()
+            # 创建标准配置对象
+            config = Config()
+            config.data_source.token = os.getenv("TUSHARE_TOKEN", "")
+            config.strategy.name = args.strategy
+            config.ts_code = args.ts_code
+            config.start_date = args.start_date
+            config.end_date = args.end_date
+            config.backtest.save_plot = args.save_plot
 
         result = run_backtest(config)
 
@@ -1039,7 +1040,7 @@ def main():
             logger.info(f"已保存回测记录到历史")
 
         # 导出报告
-        if args.export and result:
+        if getattr(args, 'export', None) and result:
             exporter = ReportExporter()
             if args.export in ["html", "both"]:
                 exporter.export_html(result)

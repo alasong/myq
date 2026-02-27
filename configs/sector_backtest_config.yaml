@@ -1,5 +1,5 @@
 # 板块回测配置文件示例
-# 使用方式：python -m quant_strategy.cli sector-backtest --config sector_backtest_config.yaml
+# 使用方式：python -m quant_strategy.cli sector-backtest --config configs/sector_backtest_config.yaml
 
 # 策略配置
 strategy: kdj
@@ -13,12 +13,15 @@ sector_type: custom  # industry/concept/area/custom
 sector_name: ""
 
 # 自定义股票列表（custom 模式使用）
+# 注意：龙头股模式会从这些股票中选择 top_n 只
 ts_codes:
   - "000001.SZ"
   - "000002.SZ"
   - "300001.SZ"
   - "300002.SZ"
   - "300003.SZ"
+  - "600001.SH"
+  - "600002.SH"
 
 # 日期范围
 start_date: "20250101"
@@ -28,9 +31,10 @@ end_date: "20251231"
 # individual: 逐个股票回测
 # portfolio: 等权组合回测
 # leaders: 龙头股回测
-mode: individual
+mode: leaders
 
 # 龙头股数量（leaders 模式使用）
+# 注意：如果股票池数量 < top_n，则返回所有股票
 top_n: 5
 
 # 并发配置
@@ -43,4 +47,4 @@ commission_rate: 0.0003
 slippage_rate: 0.001
 
 # 备注
-notes: "板块回测 - 逐个股票模式"
+notes: "板块回测 - 龙头股模式"

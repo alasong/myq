@@ -354,6 +354,11 @@ class DataCache:
             df["expired"] = df["updated_at"].apply(
                 lambda x: self._check_ttl_expired(x)
             )
+            # 添加完整性标记
+            if "is_complete" in df.columns:
+                df["complete"] = df["is_complete"].apply(lambda x: "✅" if x else "⚠️")
+            if "record_count" in df.columns:
+                df["records"] = df["record_count"].apply(lambda x: f"{x:.0f}" if pd.notna(x) else "N/A")
 
         return df
 

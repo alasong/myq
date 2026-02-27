@@ -108,54 +108,69 @@ class EnhancedSectorBacktester(ParallelBacktester):
     def _select_leaders(self, data_dict: dict, top_n: int = 5) -> dict:
         """
         选择龙头股
-        
+
         标准：
-        1. 市值（需要外部数据，当前用成交额代替）
-        2. 流动性（成交量）
-        3. 历史波动率（反向指标，越低越好）
-        
+        1. 成交额（代表市值和流动性）- 标准化评分
+        2. 成交量稳定性 - 标准化评分
+        3. 历史波动率（反向指标，越低越好）- 标准化评分
+        4. 市值代理（使用股票代码特征）
+
+        改进：
+        - 使用 Z-Score 标准化，避免数据量级差异
+        - 增加数据有效性检查
+
         注意：
         - 避免使用未来函数（如回测期内的收益率）
         - 真实场景应该从外部获取市值数据
-        
+
         Args:
             data_dict: {ts_code: DataFrame}
             top_n: 选择数量
-            
+
         Returns:
             筛选后的数据字典
         """
-        scores = {}
-        
+        # 第一步：收集所有股票的原始指标
+        stock_metrics = {}
+
         for ts_code, data in data_dict.items():
             if len(data) < 20:
+                logger.debug(f"{ts_code}: 数据不足 20 条，跳过")
                 continue
-            
-            # 评分标准（避免未来函数）
-            
+
             # 1. 成交额（代表市值和流动性）- 使用期初数据
-            # 使用前 5 日的平均成交额，避免使用整个回测期数据
-            initial_amount = data['amount'].iloc[:5].mean() if 'amount' in data.columns else 0
-            
-            # 2. 流动性 - 成交量稳定性
-            if 'vol' in data.columns:
-                avg_volume = data['vol'].iloc[:5].mean()
-                volume_stability = 1 / (data['vol'].std() + 1)  # 稳定性越高越好
+            if 'amount' in data.columns and data['amount'].notna().any():
+                initial_amount = data['amount'].iloc[:5].mean()
+                # 检查成交额是否有效
+                if initial_amount <= 0:
+                    logger.debug(f"{ts_code}: 成交额为零或负，跳过")
+                    continue
             else:
-                avg_volume = 0
-                volume_stability = 0
-            
+                logger.debug(f"{ts_code}: 无成交额数据，跳过")
+                continue
+
+            # 2. 流动性 - 成交量稳定性
+            if 'vol' in data.columns and data['vol'].notna().any():
+                avg_volume = data['vol'].iloc[:5].mean()
+                vol_std = data['vol'].std()
+                volume_stability = 1 / (vol_std + 1) if vol_std > 0 else 1
+                if avg_volume <= 0:
+                    logger.debug(f"{ts_code}: 成交量为零或负，跳过")
+                    continue
+            else:
+                logger.debug(f"{ts_code}: 无成交量数据，跳过")
+                continue
+
             # 3. 波动率（反向指标）- 使用历史波动率
             if len(data) > 20:
-                # 使用期初 20 日的波动率
                 volatility = data['close'].iloc[:20].pct_change().std()
             else:
                 volatility = data['close'].pct_change().std()
             
+            if pd.isna(volatility) or volatility < 0:
+                volatility = 0.05  # 默认波动率
+
             # 4. 市值代理（使用股票代码特征）
-            # 600/601/603 开头通常是沪市主板，市值较大
-            # 000/001/002 开头通常是深市主板/中小板
-            # 300 开头是创业板，市值相对较小
             market_cap_score = 0
             if ts_code.startswith(('600', '601', '603')):
                 market_cap_score = 3
@@ -163,28 +178,69 @@ class EnhancedSectorBacktester(ParallelBacktester):
                 market_cap_score = 2
             elif ts_code.startswith('300'):
                 market_cap_score = 1
-            
-            # 综合评分
-            # 成交额 40% + 流动性 20% + 低波动 20% + 市值特征 20%
-            score = (
-                initial_amount * 0.4 +
-                avg_volume * volume_stability * 0.2 +
-                (1 / (volatility + 0.01)) * 0.2 +  # 波动率越低越好
-                market_cap_score * 0.2
-            )
-            
-            scores[ts_code] = score
-        
-        # 选择前 N 名
-        if not scores:
+
+            stock_metrics[ts_code] = {
+                'amount': initial_amount,
+                'avg_volume': avg_volume,
+                'volume_stability': volume_stability,
+                'volatility': volatility,
+                'market_cap_score': market_cap_score
+            }
+
+        if not stock_metrics:
             logger.warning("没有符合条件的股票，返回全部股票")
             return data_dict
-        
-        sorted_stocks = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_n]
-        
-        logger.info(f"龙头股评分：{[(ts, f'{s:.2f}') for ts, s in sorted_stocks]}")
-        
-        return {ts_code: data_dict[ts_code] for ts_code, _ in sorted_stocks}
+
+        logger.info(f"有效指标数据：{len(stock_metrics)} 只股票")
+
+        # 第二步：标准化处理（Z-Score）
+        metrics_df = pd.DataFrame(stock_metrics).T
+
+        # 成交额标准化（越大越好）
+        amount_mean = metrics_df['amount'].mean()
+        amount_std = metrics_df['amount'].std()
+        if amount_std > 0:
+            metrics_df['amount_score'] = (metrics_df['amount'] - amount_mean) / amount_std
+        else:
+            metrics_df['amount_score'] = 0
+
+        # 成交量稳定性标准化（越大越好）
+        vol_stab_mean = metrics_df['volume_stability'].mean()
+        vol_stab_std = metrics_df['volume_stability'].std()
+        if vol_stab_std > 0:
+            metrics_df['vol_stab_score'] = (metrics_df['volume_stability'] - vol_stab_mean) / vol_stab_std
+        else:
+            metrics_df['vol_stab_score'] = 0
+
+        # 波动率标准化（越小越好，取负）
+        vol_mean = metrics_df['volatility'].mean()
+        vol_std = metrics_df['volatility'].std()
+        if vol_std > 0:
+            metrics_df['vol_score'] = -(metrics_df['volatility'] - vol_mean) / vol_std  # 负向指标
+        else:
+            metrics_df['vol_score'] = 0
+
+        # 市值评分已经是离散的 1-3 分，需要归一化到 0-1
+        metrics_df['market_score'] = metrics_df['market_cap_score'] / 3.0
+
+        # 第三步：综合评分
+        # 成交额 40% + 流动性稳定性 20% + 低波动 20% + 市值特征 20%
+        metrics_df['total_score'] = (
+            metrics_df['amount_score'] * 0.4 +
+            metrics_df['vol_stab_score'] * 0.2 +
+            metrics_df['vol_score'] * 0.2 +
+            metrics_df['market_score'] * 0.2
+        )
+
+        # 选择前 N 名
+        sorted_stocks = metrics_df.nlargest(top_n, 'total_score')
+
+        logger.info(f"龙头股评分（Top {top_n}）:")
+        for ts_code, row in sorted_stocks.iterrows():
+            logger.info(f"  {ts_code}: {row['total_score']:.2f} "
+                       f"(成交额={row['amount']/1e8:.2f}亿，波动率={row['volatility']:.2%})")
+
+        return {ts_code: data_dict[ts_code] for ts_code in sorted_stocks.index}
     
     def _calculate_portfolio_return(self, results: dict) -> Optional[BacktestTaskResult]:
         """
