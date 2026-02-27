@@ -69,44 +69,53 @@ def get_all_stocks(provider):
     return stock_list['ts_code'].tolist()
 
 
-def check_cache_completeness(cache, ts_code, start_date, end_date):
+def check_cache_completeness(cache, ts_code, start_date, end_date, expected_days=None):
     """
     检查某只股票的缓存完整性
-    
+
+    Args:
+        cache: 缓存对象
+        ts_code: 股票代码
+        start_date: 开始日期 YYYYMMDD
+        end_date: 结束日期 YYYYMMDD
+        expected_days: 预期交易日天数（可选，如不提供则自动计算）
+
     Returns:
         str: 'complete' - 完整数据
              'partial' - 部分数据
              'missing' - 无缓存
     """
     params = {"ts_code": ts_code, "start": start_date, "end": end_date, "adj": "qfq"}
-    
-    # 计算预期交易日天数（约 250 天/年）
-    start_dt = pd.to_datetime(start_date, format='%Y%m%d')
-    end_dt = pd.to_datetime(end_date, format='%Y%m%d')
-    expected_days = int(((end_dt - start_dt).days * 250 / 365) * 0.95)
-    
+
+    # 计算预期交易日天数
+    if expected_days is None:
+        # 使用实际交易日计算（约 250 天/年）
+        start_dt = pd.to_datetime(start_date, format='%Y%m%d')
+        end_dt = pd.to_datetime(end_date, format='%Y%m%d')
+        expected_days = int(((end_dt - start_dt).days * 250 / 365) * 0.95)
+
     # 从缓存获取
     cached = cache.get("daily", params, start_date, end_date, expected_days=expected_days)
-    
+
     if cached is None:
         return 'missing'
-    
+
     # 检查元数据中的完整性标记
     key = cache._generate_key("daily", params)
     cache_entry = cache._metadata[cache._metadata["key"] == key]
-    
+
     if not cache_entry.empty:
         row = cache_entry.iloc[0]
         is_complete = row.get("is_complete", False) if "is_complete" in cache_entry.columns else False
-        
+
         if is_complete:
             return 'complete'
-        
+
         # 检查记录数
         record_count = row.get("record_count", 0) if "record_count" in cache_entry.columns else 0
         if record_count >= expected_days:
             return 'complete'
-    
+
     return 'partial'
 
 

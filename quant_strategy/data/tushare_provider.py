@@ -36,37 +36,192 @@ class TushareDataProvider:
         
         logger.info("Tushare 数据提供者初始化成功")
     
-    def get_trade_cal(self, exchange: str = "SSE", start_date: str = None, 
+    def get_trade_cal(self, exchange: str = "SSE", start_date: str = None,
                       end_date: str = None) -> pd.DataFrame:
         """
-        获取交易日历
-        
+        获取交易日历（本地存储，按年份缓存）
+
         Args:
             exchange: 交易所 SSE(上交所)/SZSE(深交所)
             start_date: 开始日期 YYYYMMDD
             end_date: 结束日期 YYYYMMDD
         """
-        params = {"exchange": exchange}
-        cache_key_params = {"exchange": exchange, "start": start_date, "end": end_date}
+        # 解析年份范围
+        start_year = start_date[:4] if start_date else str(pd.Timestamp.now().year)
+        end_year = end_date[:4] if end_date else str(pd.Timestamp.now().year)
         
-        if self.use_cache:
-            cached = self.cache.get("trade_cal", cache_key_params, start_date, end_date)
-            if cached is not None:
-                return cached
+        # 按年份获取和缓存交易日历
+        all_dates = []
+        for year in range(int(start_year), int(end_year) + 1):
+            year_start = f"{year}0101"
+            year_end = f"{year}1231"
+            cache_key_params = {"exchange": exchange, "year": str(year)}
+            
+            if self.use_cache:
+                cached = self.cache.get("trade_cal_year", cache_key_params, year_start, year_end)
+                if cached is not None:
+                    all_dates.append(cached)
+                    continue
+            
+            # 获取全年交易日历
+            cal_df = self.pro.trade_cal(
+                exchange=exchange,
+                start_date=year_start,
+                end_date=year_end,
+                fields="cal_date,is_open"
+            )
+            cal_df = cal_df[cal_df["is_open"] == 1]["cal_date"]
+            
+            if self.use_cache:
+                self.cache.set("trade_cal_year", cache_key_params, 
+                              cal_df.to_frame(name="cal_date"), is_complete=True)
+            
+            all_dates.append(cal_df)
         
-        cal_df = self.pro.trade_cal(
-            exchange=exchange,
-            start_date=start_date,
-            end_date=end_date,
-            fields="cal_date,is_open"
-        )
-        cal_df = cal_df[cal_df["is_open"] == 1]["cal_date"]
+        # 合并所有年份数据
+        if all_dates:
+            result = pd.concat(all_dates, ignore_index=True)
+            # 按日期范围过滤
+            if start_date and end_date:
+                result = result[(result["cal_date"] >= start_date) & (result["cal_date"] <= end_date)]
+            return result
+        return pd.DataFrame()
+
+    def _get_exchange(self, ts_code: str) -> str:
+        """
+        根据股票代码获取交易所
+
+        Args:
+            ts_code: 股票代码，如 "000001.SZ"
+
+        Returns:
+            交易所代码：SSE/SZSE/BJSE
+        """
+        if ts_code.endswith('.SH'):
+            return 'SSE'
+        elif ts_code.endswith('.SZ'):
+            return 'SZSE'
+        elif ts_code.endswith('.BJ'):
+            return 'BJSE'
+        else:
+            # 默认根据代码前缀判断
+            if ts_code.startswith('6'):
+                return 'SSE'
+            elif ts_code.startswith(('0', '3')):
+                return 'SZSE'
+            else:
+                return 'BJSE'
+
+    def _get_suspend_days(self, ts_code: str, start_date: str, end_date: str) -> int:
+        """
+        获取股票停牌天数（按年份本地存储）
+
+        Args:
+            ts_code: 股票代码
+            start_date: 开始日期 YYYYMMDD
+            end_date: 结束日期 YYYYMMDD
+
+        Returns:
+            停牌天数
+        """
+        # 解析年份范围
+        start_year = start_date[:4]
+        end_year = end_date[:4]
         
-        if self.use_cache:
-            self.cache.set("trade_cal", cache_key_params, cal_df.to_frame(name="cal_date"))
+        # 按年份获取和缓存停牌数据
+        all_suspend_dates = []
         
-        return cal_df
-    
+        for year in range(int(start_year), int(end_year) + 1):
+            year_start = f"{year}0101"
+            year_end = f"{year}1231"
+            cache_key_params = {"ts_code": ts_code, "year": str(year)}
+            
+            if self.use_cache:
+                cached = self.cache.get("suspend_cal_year", cache_key_params, year_start, year_end)
+                if cached is not None and not cached.empty:
+                    all_suspend_dates.append(cached)
+                    continue
+            
+            try:
+                # 获取全年停牌数据
+                suspend_df = self.pro.suspend_cal(
+                    ts_code=ts_code,
+                    start_date=year_start,
+                    end_date=year_end
+                )
+                
+                if suspend_df is not None and not suspend_df.empty:
+                    # 转换为日期格式
+                    date_col = 'trade_date' if 'trade_date' in suspend_df.columns else suspend_df.columns[0]
+                    suspend_df = suspend_df.copy()
+                    suspend_df[date_col] = pd.to_datetime(suspend_df[date_col], format='%Y%m%d')
+                    
+                    if self.use_cache:
+                        self.cache.set("suspend_cal_year", cache_key_params, 
+                                      suspend_df[[date_col]], is_complete=True)
+                    
+                    all_suspend_dates.append(suspend_df[[date_col]])
+                    
+            except Exception as e:
+                logger.debug(f"获取停牌数据失败 {ts_code} ({year}年): {e}")
+                continue
+        
+        if not all_suspend_dates:
+            return 0
+        
+        # 合并所有年份数据
+        suspend_df = pd.concat(all_suspend_dates, ignore_index=True)
+        # 去重
+        suspend_df = suspend_df.drop_duplicates()
+        # 按日期范围过滤
+        mask = (suspend_df.iloc[:, 0] >= pd.to_datetime(start_date, format='%Y%m%d')) & \
+               (suspend_df.iloc[:, 0] <= pd.to_datetime(end_date, format='%Y%m%d'))
+        
+        return int(mask.sum())
+
+    def _calc_expected_trading_days(self, ts_code: str, start_date: str, end_date: str) -> int:
+        """
+        计算预期交易日天数（考虑实际交易日和股票停牌）
+
+        逻辑：
+        1. 获取交易所交易日历（本地存储，按年份缓存）
+        2. 获取股票停牌日期（本地存储，按年份缓存）
+        3. 预期交易日 = 交易日 - 停牌日
+
+        Args:
+            ts_code: 股票代码
+            start_date: 开始日期 YYYYMMDD
+            end_date: 结束日期 YYYYMMDD
+
+        Returns:
+            预期交易日天数（100% 完整度要求）
+        """
+        exchange = self._get_exchange(ts_code)
+
+        # 1. 获取交易日历
+        try:
+            trade_cal = self.get_trade_cal(exchange, start_date, end_date)
+            if trade_cal is None or trade_cal.empty:
+                # 无法获取交易日历，使用估算
+                start_dt = pd.to_datetime(start_date, format='%Y%m%d')
+                end_dt = pd.to_datetime(end_date, format='%Y%m%d')
+                return int(((end_dt - start_dt).days * 250 / 365))
+
+            total_trading_days = len(trade_cal)
+
+        except Exception as e:
+            logger.debug(f"获取交易日历失败 {ts_code}: {e}，使用估算")
+            start_dt = pd.to_datetime(start_date, format='%Y%m%d')
+            end_dt = pd.to_datetime(end_date, format='%Y%m%d')
+            return int(((end_dt - start_dt).days * 250 / 365))
+
+        # 2. 获取停牌日期
+        suspend_days = self._get_suspend_days(ts_code, start_date, end_date)
+
+        # 3. 预期交易日 = 交易日 - 停牌日（100% 要求，不容错）
+        expected_days = max(0, total_trading_days - suspend_days)
+        return expected_days
+
     def get_daily_data(self, ts_code: str, start_date: str, end_date: str,
                        adj: str = "qfq") -> pd.DataFrame:
         """
@@ -84,10 +239,8 @@ class TushareDataProvider:
         params = {"ts_code": ts_code, "start": start_date, "end": end_date, "adj": adj}
         cache_key_params = params.copy()
 
-        # 计算预期交易日天数（约 250 天/年）
-        start_dt = pd.to_datetime(start_date, format='%Y%m%d')
-        end_dt = pd.to_datetime(end_date, format='%Y%m%d')
-        expected_days = int(((end_dt - start_dt).days * 250 / 365) * 0.95)  # 95% 容错
+        # 计算预期交易日天数（使用实际交易日日历）
+        expected_days = self._calc_expected_trading_days(ts_code, start_date, end_date)
 
         if self.use_cache:
             cached = self.cache.get("daily", cache_key_params, start_date, end_date, expected_days=expected_days)
@@ -115,14 +268,33 @@ class TushareDataProvider:
                     fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount"
                 )
 
-            df = self._process_daily(df)
+            # 处理数据格式（包含重复数据检测和清理）
+            df = self._process_daily(df, ts_code)
 
             if self.use_cache:
-                # 检查数据完整性
+                # 检查数据完整性（100% 要求）
                 actual_days = len(df)
-                is_complete = actual_days >= expected_days
+                
+                # 检测重复数据
+                duplicates = df.index.duplicated().sum()
+                if duplicates > 0:
+                    logger.warning(f"{ts_code}: 检测到 {duplicates} 条重复数据，已清理")
+                    df = df[~df.index.duplicated(keep='first')]
+                    actual_days = len(df)
+                
+                # 100% 完整度要求
+                is_complete = (actual_days == expected_days)
+                
+                # 超过 100% 说明有异常数据
+                if actual_days > expected_days:
+                    logger.warning(f"{ts_code}: 数据异常！实际{actual_days}天 > 预期{expected_days}天，可能存在重复")
+                    # 尝试清理重复
+                    df = df[~df.index.duplicated(keep='first')]
+                    actual_days = len(df)
+                    is_complete = (actual_days == expected_days)
+                
                 self.cache.set("daily", cache_key_params, df, is_complete=is_complete)
-                logger.info(f"获取数据：{ts_code} ({actual_days}天，完整={is_complete})")
+                logger.info(f"获取数据：{ts_code} ({actual_days}/{expected_days}天，完整={is_complete})")
 
             return df
         except Exception as e:
