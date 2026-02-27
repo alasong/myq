@@ -290,6 +290,16 @@ class TushareDataProvider:
 
             if historical_df is not None and not historical_df.empty:
                 # 2. 检查是否有新数据
+                # 确保索引是 datetime 类型
+                if not pd.api.types.is_datetime64_any_dtype(historical_df.index):
+                    # 使用混合模式推断日期格式
+                    try:
+                        historical_df.index = pd.to_datetime(historical_df.index, format='mixed')
+                    except Exception as idx_err:
+                        logger.warning(f"{ts_code}: 索引转换失败：{idx_err}，尝试重新获取数据")
+                        # 索引无法转换，删除旧缓存重新获取
+                        return self._fetch_all_history(ts_code, start_date, end_date, adj, full_cache_params)
+                
                 last_date = historical_df.index.max().strftime('%Y%m%d')
                 need_update = last_date < end_date
 
@@ -325,9 +335,16 @@ class TushareDataProvider:
                 return historical_df
 
             else:
-                # 无缓存，获取全部历史数据
-                logger.info(f"{ts_code}: 首次获取全部历史数据")
-                return self._fetch_all_history(ts_code, start_date, end_date, adj, full_cache_params)
+                # 无缓存，直接获取请求范围的数据（不是全部历史数据）
+                logger.info(f"{ts_code}: 获取请求范围数据 {start_date}-{end_date}")
+                df = self._fetch_daily_range(ts_code, start_date, end_date, adj, cache_params)
+                
+                # 同时保存到 daily_full 缓存（标记为完整）
+                if df is not None and not df.empty:
+                    self.cache.set("daily_full", full_cache_params, df, is_complete=True)
+                    logger.info(f"{ts_code}: 已保存缓存（{len(df)}天）")
+                
+                return df
 
         except Exception as e:
             # P1-2: 增强错误处理，区分错误类型
@@ -359,19 +376,36 @@ class TushareDataProvider:
         """
         try:
             # 1. 获取股票基本信息（包含上市日期）
+            list_date = start_date  # 默认使用请求的开始日期
             try:
                 stock_info = self.pro.stock_basic(ts_code=ts_code, fields="ts_code,list_date")
                 if stock_info is not None and not stock_info.empty:
-                    list_date_str = stock_info['list_date'].iloc[0]
+                    list_date_val = stock_info['list_date'].iloc[0]
+                    logger.debug(f"{ts_code}: 原始上市日期值 = {list_date_val}, 类型 = {type(list_date_val).__name__}")
+                    
                     # 转换上市日期格式 YYYYMMDD
-                    if pd.notna(list_date_str):
-                        list_date = str(list_date_str)
-                        if len(list_date) == 8:
-                            # 已经是 YYYYMMDD 格式
-                            pass
+                    if pd.notna(list_date_val):
+                        # 处理 int 或 string 类型
+                        if isinstance(list_date_val, (int, float)):
+                            list_date = str(int(list_date_val))
+                            logger.debug(f"{ts_code}: int/float 转换后 = {list_date}")
                         else:
-                            # 可能是其他格式，尝试转换
-                            list_date = pd.to_datetime(list_date_str).strftime('%Y%m%d')
+                            list_date = str(list_date_val)
+                            logger.debug(f"{ts_code}: string 转换后 = {list_date}")
+
+                        # 确保是 8 位数字格式
+                        if len(list_date) == 8 and list_date.isdigit():
+                            pass  # 已经是 YYYYMMDD 格式
+                        elif len(list_date) == 10 and '-' in list_date:
+                            # YYYY-MM-DD 格式转换为 YYYYMMDD
+                            list_date = list_date.replace('-', '')
+                        else:
+                            # 其他格式，尝试解析
+                            try:
+                                list_date = pd.to_datetime(list_date).strftime('%Y%m%d')
+                            except Exception as parse_err:
+                                logger.debug(f"{ts_code}: 日期解析失败：{parse_err}，使用默认值")
+                                list_date = start_date  # 解析失败，使用默认值
                     else:
                         list_date = start_date  # 无法获取上市日期，使用请求的开始日期
                 else:
@@ -382,7 +416,7 @@ class TushareDataProvider:
 
             # 2. 从上市日期开始获取全部历史数据
             logger.info(f"{ts_code}: 从上市日期 ({list_date}) 获取全部历史数据")
-            
+
             if adj:
                 adj_factor = self.get_adj_factor(ts_code, list_date, end_date)
                 df = self.pro.daily(

@@ -229,6 +229,15 @@ class DataCache:
 
                 # P0-2: 对于 daily_full 类型，需要按日期范围过滤（使用索引过滤）
                 if data_type == "daily_full" and start_date and end_date:
+                    # 确保索引是 datetime 类型
+                    if not pd.api.types.is_datetime64_any_dtype(df.index):
+                        # 尝试多种格式转换
+                        try:
+                            df.index = pd.to_datetime(df.index, format='%Y%m%d')
+                        except (ValueError, TypeError):
+                            # 如果已经是 datetime 或其他格式，自动推断
+                            df.index = pd.to_datetime(df.index)
+                    
                     # 使用索引过滤（daily_full 数据已设置索引为 trade_date）
                     start_dt = pd.to_datetime(start_date, format='%Y%m%d')
                     end_dt = pd.to_datetime(end_date, format='%Y%m%d')

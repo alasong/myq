@@ -5,6 +5,7 @@
 1. 预先获取并缓存所有股票数据
 2. 支持增量更新（跳过已完整的数据）
 3. 显示进度和统计信息
+4. 支持多线程并发获取
 
 数据源：
 - 仅使用 Tushare（稳定可靠）
@@ -12,9 +13,12 @@
 使用方法：
     # 自动跳过已完整的数据
     python -m quant_strategy.tools.fetch_all_stocks --start 20230101 --end 20231231
-    
+
     # 强制重新获取（忽略缓存）
     python -m quant_strategy.tools.fetch_all_stocks --start 20230101 --end 20231231 --force
+    
+    # 使用多线程加速（推荐：4 个线程）
+    python -m quant_strategy.tools.fetch_all_stocks --start 20230101 --end 20231231 --workers 4
 """
 import argparse
 import sys
@@ -23,6 +27,8 @@ from datetime import datetime
 from pathlib import Path
 import pandas as pd
 from loguru import logger
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -119,7 +125,32 @@ def check_cache_completeness(cache, ts_code, start_date, end_date, expected_days
     return 'partial'
 
 
-def fetch_and_cache_stocks(provider, ts_codes, start_date, end_date, batch_size=100, force=False):
+def fetch_single_stock(provider, ts_code, start_date, end_date, adj="qfq"):
+    """
+    获取单只股票数据（用于多线程）
+    
+    Returns:
+        tuple: (ts_code, success, message)
+    """
+    try:
+        df = provider.get_daily_data(ts_code, start_date, end_date, adj=adj)
+        if df is not None and not df.empty:
+            has_amount = 'amount' in df.columns and df['amount'].notna().any()
+            has_vol = 'vol' in df.columns and df['vol'].notna().any()
+            
+            if has_amount and has_vol:
+                return (ts_code, True, "✅")
+            elif has_amount or has_vol:
+                return (ts_code, True, "⚠️ ")
+            else:
+                return (ts_code, True, "❓")
+        else:
+            return (ts_code, False, "空数据")
+    except Exception as e:
+        return (ts_code, False, str(e))
+
+
+def fetch_and_cache_stocks(provider, ts_codes, start_date, end_date, batch_size=100, force=False, workers=1):
     """
     批量获取并缓存股票数据
 
@@ -130,6 +161,7 @@ def fetch_and_cache_stocks(provider, ts_codes, start_date, end_date, batch_size=
         end_date: 结束日期 YYYYMMDD
         batch_size: 批次大小
         force: 是否强制重新获取（忽略缓存）
+        workers: 并发线程数
     """
     cache = provider.cache
     total = len(ts_codes)
@@ -137,7 +169,7 @@ def fetch_and_cache_stocks(provider, ts_codes, start_date, end_date, batch_size=
     failed = 0
     skipped_complete = 0
     skipped_partial = 0
-    
+
     # 先检查缓存状态
     if not force and cache:
         logger.info("检查缓存完整性...")
@@ -169,49 +201,92 @@ def fetch_and_cache_stocks(provider, ts_codes, start_date, end_date, batch_size=
         logger.info("")
     
     logger.info(f"开始获取 {total} 只股票数据，时间范围：{start_date} - {end_date}")
-    logger.info(f"批次大小：{batch_size}")
+    logger.info(f"并发线程数：{workers}")
     
-    for i in range(0, total, batch_size):
-        batch = ts_codes[i:i + batch_size]
-        batch_num = i // batch_size + 1
-        total_batches = (total + batch_size - 1) // batch_size
+    # 使用多线程获取
+    if workers > 1:
+        # 多线程模式
+        progress_lock = threading.Lock()
+        progress_counter = {'count': 0}
         
-        logger.info(f"处理批次 {batch_num}/{total_batches} (股票 {i+1}-{min(i+batch_size, total)})")
-        
-        for j, ts_code in enumerate(batch):
-            try:
-                # 获取数据（会自动缓存）
-                df = provider.get_daily_data(ts_code, start_date, end_date, adj="qfq")
+        def fetch_with_progress(ts_code):
+            result = fetch_single_stock(provider, ts_code, start_date, end_date)
+            ts_code, ok, status = result
+            
+            with progress_lock:
+                progress_counter['count'] += 1
+                count = progress_counter['count']
                 
-                if df is not None and not df.empty:
-                    # 检查是否有 amount 和 vol 数据
-                    has_amount = 'amount' in df.columns and df['amount'].notna().any()
-                    has_vol = 'vol' in df.columns and df['vol'].notna().any()
-                    
-                    if has_amount and has_vol:
-                        success += 1
-                        status = "✅"
-                    elif has_amount or has_vol:
-                        success += 1
-                        status = "⚠️ "  # 部分数据缺失
-                    else:
-                        success += 1
-                        status = "❓"  # 数据字段缺失
-                    
-                    # 每 10 只股票显示一次进度
-                    if (i + j + 1) % 10 == 0:
-                        logger.info(f"进度：{i+j+1}/{total} ({(i+j+1)/total*100:.1f}%) - {status} {ts_code}")
+                # 每 10 只显示一次进度
+                if count % 10 == 0 or count == total:
+                    pct = count / total * 100
+                    logger.info(f"进度：{count}/{total} ({pct:.1f}%) - {status} {ts_code}")
+                
+                if ok:
+                    return True
                 else:
-                    failed += 1
-                    logger.warning(f"获取数据为空：{ts_code}")
-                    
-            except Exception as e:
-                failed += 1
-                logger.error(f"获取数据失败 {ts_code}: {e}")
-                continue
+                    return False
+            
+            return ok
         
-        # 每批次结束后保存统计
-        logger.debug(f"批次完成：成功{success}，失败{failed}")
+        # 使用线程池
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(fetch_with_progress, ts_code): ts_code for ts_code in ts_codes}
+            
+            for future in as_completed(futures):
+                try:
+                    ok = future.result()
+                    if ok:
+                        success += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    failed += 1
+                    logger.debug(f"线程异常：{e}")
+    
+    else:
+        # 单线程模式（原逻辑）
+        for i in range(0, total, batch_size):
+            batch = ts_codes[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            total_batches = (total + batch_size - 1) // batch_size
+
+            logger.info(f"处理批次 {batch_num}/{total_batches} (股票 {i+1}-{min(i+batch_size, total)})")
+
+            for j, ts_code in enumerate(batch):
+                try:
+                    # 获取数据（会自动缓存）
+                    df = provider.get_daily_data(ts_code, start_date, end_date, adj="qfq")
+
+                    if df is not None and not df.empty:
+                        # 检查是否有 amount 和 vol 数据
+                        has_amount = 'amount' in df.columns and df['amount'].notna().any()
+                        has_vol = 'vol' in df.columns and df['vol'].notna().any()
+
+                        if has_amount and has_vol:
+                            success += 1
+                            status = "✅"
+                        elif has_amount or has_vol:
+                            success += 1
+                            status = "⚠️ "  # 部分数据缺失
+                        else:
+                            success += 1
+                            status = "❓"  # 数据字段缺失
+
+                        # 每 10 只股票显示一次进度
+                        if (i + j + 1) % 10 == 0:
+                            logger.info(f"进度：{i+j+1}/{total} ({(i+j+1)/total*100:.1f}%) - {status} {ts_code}")
+                    else:
+                        failed += 1
+                        logger.warning(f"获取数据为空：{ts_code}")
+
+                except Exception as e:
+                    failed += 1
+                    logger.error(f"获取数据失败 {ts_code}: {e}")
+                    continue
+
+            # 每批次结束后保存统计
+            logger.debug(f"批次完成：成功{success}，失败{failed}")
     
     # 最终统计
     logger.info("=" * 60)
@@ -237,7 +312,8 @@ def main():
     parser.add_argument("--batch", type=int, default=100, help="批次大小")
     parser.add_argument("--force", action="store_true", help="强制重新获取（忽略缓存）")
     parser.add_argument("--token", type=str, help="Tushare Token（不设置则从环境变量读取）")
-    
+    parser.add_argument("--workers", type=int, default=1, help="并发线程数（默认 1，推荐 4）")
+
     args = parser.parse_args()
     
     # 设置日志
@@ -268,7 +344,7 @@ def main():
         return
     
     # 获取并缓存数据
-    fetch_and_cache_stocks(provider, ts_codes, args.start, args.end, args.batch, args.force)
+    fetch_and_cache_stocks(provider, ts_codes, args.start, args.end, args.batch, args.force, args.workers)
     
     # 验证缓存
     cache = provider.cache
