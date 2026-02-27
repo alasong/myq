@@ -100,13 +100,24 @@ def check_cache_completeness(cache, ts_code, start_date, end_date, expected_days
         end_dt = pd.to_datetime(end_date, format='%Y%m%d')
         expected_days = int(((end_dt - start_dt).days * 250 / 365) * 0.95)
 
-    # 从缓存获取
+    # 1. 先检查是否有 daily_full 完整数据标记
+    # daily_full 类型表示该股票的全部历史数据，可以直接使用
+    full_key_pattern = f"daily_full_{ts_code}"
+    full_entries = cache._metadata[cache._metadata["key"].str.contains(full_key_pattern, na=False)]
+    
+    if not full_entries.empty:
+        # 检查 is_complete 标记
+        is_complete = full_entries.iloc[0].get("is_complete", False) if "is_complete" in full_entries.columns else False
+        if is_complete:
+            return 'complete'
+    
+    # 2. 从缓存获取（普通 daily 类型）
     cached = cache.get("daily", params, start_date, end_date, expected_days=expected_days)
 
     if cached is None:
         return 'missing'
 
-    # 检查元数据中的完整性标记
+    # 3. 检查元数据中的完整性标记
     key = cache._generate_key("daily", params)
     cache_entry = cache._metadata[cache._metadata["key"] == key]
 
