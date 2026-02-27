@@ -97,7 +97,7 @@ def main():
         new_argv = ['ai_assistant_pro']
         if args.token:
             new_argv.extend(['--token', args.token])
-        if args.cmd:
+        if args.command:  # 只有指定了命令才传递
             new_argv.extend(['--command', args.command])
         
         # 保存原 argv

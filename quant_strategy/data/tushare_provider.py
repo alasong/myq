@@ -337,13 +337,16 @@ class TushareDataProvider:
             else:
                 # 无缓存，直接获取请求范围的数据（不是全部历史数据）
                 logger.info(f"{ts_code}: 获取请求范围数据 {start_date}-{end_date}")
-                df = self._fetch_daily_range(ts_code, start_date, end_date, adj, cache_params)
                 
+                # 创建当前请求的缓存参数
+                request_cache_params = {"ts_code": ts_code, "start": start_date, "end": end_date, "adj": adj}
+                df = self._fetch_daily_range(ts_code, start_date, end_date, adj, request_cache_params)
+
                 # 同时保存到 daily_full 缓存（标记为完整）
                 if df is not None and not df.empty:
                     self.cache.set("daily_full", full_cache_params, df, is_complete=True)
                     logger.info(f"{ts_code}: 已保存缓存（{len(df)}天）")
-                
+
                 return df
 
         except Exception as e:
