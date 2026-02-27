@@ -13,6 +13,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from loguru import logger
 import time
+from typing import List, Dict, Optional
 from collections import OrderedDict
 
 
@@ -85,8 +86,18 @@ class DataCache:
             df.to_csv(access_file, index=False)
 
     def _generate_key(self, data_type: str, params: dict) -> str:
-        """生成缓存键"""
+        """
+        生成缓存键
+        
+        P1-1: 使用哈希避免冲突和长度限制
+        """
         param_str = "_".join(f"{k}={v}" for k, v in sorted(params.items()))
+        
+        # P1-1: 限制长度，超过 100 字符使用 MD5 哈希
+        if len(param_str) > 100:
+            import hashlib
+            param_str = hashlib.md5(param_str.encode()).hexdigest()
+        
         return f"{data_type}_{param_str}"
     
     def _update_access_log(self, key: str):
@@ -121,20 +132,26 @@ class DataCache:
     def _enforce_size_limit(self):
         """执行缓存大小限制（LRU 淘汰）"""
         current_size_mb = self._get_total_size_mb()
-        
+
         if current_size_mb <= self.max_size_mb:
             return
-        
+
         # 按 LRU 顺序淘汰
         keys_to_remove = list(self._access_log.keys())
-        
+
         for key in keys_to_remove:
             if current_size_mb <= self.max_size_mb * 0.8:  # 淘汰到 80% 以下
                 break
-            
+
             # 找到对应的元数据
             cache_entry = self._metadata[self._metadata["key"] == key]
             if not cache_entry.empty:
+                # P0-1: 跳过 daily_full 类型（永久保存的数据）
+                data_type = cache_entry.iloc[0].get("data_type", "")
+                if data_type == "daily_full":
+                    logger.debug(f"跳过 daily_full 类型缓存：{key}（永久保存）")
+                    continue
+
                 path = cache_entry.iloc[0]["path"]
                 try:
                     if Path(path).exists():
@@ -146,10 +163,10 @@ class DataCache:
                         logger.debug(f"LRU 淘汰：{key} ({file_size:.2f} MB)")
                 except Exception as e:
                     logger.warning(f"淘汰缓存失败：{e}")
-            
+
             if key in self._access_log:
                 del self._access_log[key]
-        
+
         self._save_metadata()
     
     def _get_total_size_mb(self) -> float:
@@ -201,14 +218,25 @@ class DataCache:
 
         # 检查数据完整性（如果标记为完整）
         is_complete = row.get("is_complete", False) if "is_complete" in cache_entry.columns else False
-        
+
         if is_complete:
-            # 完整数据，直接返回，不再验证日期范围
+            # 完整数据，直接返回
             logger.debug(f"缓存命中（完整数据）：{key}")
             self._stats["hits"] += 1
             self._update_access_log(key)
             try:
-                return pd.read_parquet(cache_path)
+                df = pd.read_parquet(cache_path)
+
+                # P0-2: 对于 daily_full 类型，需要按日期范围过滤（使用索引过滤）
+                if data_type == "daily_full" and start_date and end_date:
+                    # 使用索引过滤（daily_full 数据已设置索引为 trade_date）
+                    start_dt = pd.to_datetime(start_date, format='%Y%m%d')
+                    end_dt = pd.to_datetime(end_date, format='%Y%m%d')
+                    mask = (df.index >= start_dt) & (df.index <= end_dt)
+                    result = df[mask].copy()
+                    return result
+
+                return df
             except Exception as e:
                 logger.warning(f"读取缓存失败：{e}")
                 self._stats["misses"] += 1
@@ -225,18 +253,34 @@ class DataCache:
                 if mask.sum() == 0:
                     self._stats["misses"] += 1
                     return None
-                
-                # 如果有预期天数，检查数据完整性
+
+                # 如果有预期天数，检查数据完整性（100% 要求）
                 if expected_days and self.completeness_check:
                     actual_days = mask.sum()
+                    
+                    # 检测重复数据
+                    if "trade_date" in df.columns:
+                        duplicates = df["trade_date"].duplicated().sum()
+                        if duplicates > 0:
+                            logger.warning(f"缓存数据存在重复：{key} ({duplicates}条重复)")
+                            self._stats["misses"] += 1
+                            return None
+                    
                     completeness = actual_days / expected_days
-                    if completeness < 0.9:  # 少于 90% 认为不完整
+                    
+                    # 100% 完整度要求
+                    if actual_days < expected_days:
                         logger.debug(f"缓存数据不完整：{key} (期望{expected_days}天，实际{actual_days}天，完整度{completeness:.1%})")
                         self._stats["misses"] += 1
                         return None
-                    elif completeness >= 0.95:
+                    elif actual_days == expected_days:
                         # 标记为完整数据
                         self._mark_as_complete(key, actual_days)
+                    elif actual_days > expected_days:
+                        # 超过预期，可能存在重复
+                        logger.warning(f"缓存数据异常：{key} (期望{expected_days}天，实际{actual_days}天，可能存在重复)")
+                        self._stats["misses"] += 1
+                        return None
 
             logger.debug(f"缓存命中：{key}")
             self._stats["hits"] += 1
@@ -276,6 +320,24 @@ class DataCache:
         self._enforce_size_limit()
 
         key = self._generate_key(data_type, params)
+        
+        # P0-3: 删除旧的相同 key 的记录，确保每个 key 只有一条记录
+        old_entry = self._metadata[self._metadata["key"] == key]
+        if not old_entry.empty:
+            # 删除旧的缓存文件
+            for _, row in old_entry.iterrows():
+                try:
+                    old_path = Path(row["path"])
+                    if old_path.exists():
+                        old_path.unlink()
+                        logger.debug(f"删除旧缓存文件：{old_path}")
+                except Exception as e:
+                    logger.warning(f"删除旧缓存文件失败：{e}")
+            
+            # 删除旧的元数据记录
+            self._metadata = self._metadata[self._metadata["key"] != key]
+            logger.debug(f"清理旧元数据记录：{key}")
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{key}_{timestamp}.parquet"
         cache_path = self.cache_dir / filename
@@ -286,7 +348,7 @@ class DataCache:
             # 计算记录数
             record_count = len(df)
 
-            # 更新元数据
+            # 更新元数据（添加新记录）
             new_entry = pd.DataFrame([{
                 "key": key,
                 "path": str(cache_path),
@@ -464,3 +526,176 @@ class DataCache:
             "lru_entries": len(self._access_log)
         })
         return stats
+
+    def get_cache_report(self) -> dict:
+        """
+        P2-2: 生成缓存统计报告
+        
+        Returns:
+            缓存统计报告字典
+        """
+        if self._metadata.empty:
+            return {
+                "total_size_mb": 0,
+                "total_files": 0,
+                "by_type": {},
+                "complete_count": 0,
+                "incomplete_count": 0,
+                "oldest_cache": None,
+                "newest_cache": None,
+                "avg_age_days": 0,
+                "stock_count": 0
+            }
+        
+        # 按类型统计
+        by_type = self._metadata.groupby("data_type").size().to_dict()
+        
+        # 完整/不完整统计
+        if "is_complete" in self._metadata.columns:
+            complete_count = len(self._metadata[self._metadata["is_complete"] == True])
+            incomplete_count = len(self._metadata[self._metadata["is_complete"] == False])
+        else:
+            complete_count = len(self._metadata)
+            incomplete_count = 0
+        
+        # 计算缓存年龄
+        def parse_age_days(updated_at: str) -> float:
+            try:
+                return self._get_cache_age_days(updated_at)
+            except:
+                return 0
+        
+        ages = self._metadata["updated_at"].apply(parse_age_days)
+        avg_age_days = ages.mean() if not ages.empty else 0
+        
+        # 最早和最晚缓存
+        try:
+            oldest_cache = pd.to_datetime(self._metadata["updated_at"].min(), format='%Y%m%d_%H%M%S')
+            newest_cache = pd.to_datetime(self._metadata["updated_at"].max(), format='%Y%m%d_%H%M%S')
+        except:
+            oldest_cache = None
+            newest_cache = None
+        
+        # 股票数量
+        stock_count = 0
+        if "ts_code" in self._metadata.columns:
+            stock_count = self._metadata["ts_code"].dropna().nunique()
+        
+        return {
+            "total_size_mb": self._get_total_size_mb(),
+            "total_files": len(self._metadata),
+            "by_type": by_type,
+            "complete_count": complete_count,
+            "incomplete_count": incomplete_count,
+            "oldest_cache": oldest_cache,
+            "newest_cache": newest_cache,
+            "avg_age_days": round(avg_age_days, 1),
+            "stock_count": stock_count
+        }
+
+    def export_cache(self, output_dir: str, ts_codes: List[str] = None, data_types: List[str] = None):
+        """
+        P2-3: 导出指定股票的缓存数据（用于备份或迁移）
+        
+        Args:
+            output_dir: 输出目录
+            ts_codes: 股票代码列表，None 表示导出所有
+            data_types: 数据类型列表，None 表示导出所有
+        """
+        import shutil
+        
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        # 筛选要导出的数据
+        export_df = self._metadata.copy()
+        
+        if ts_codes:
+            export_df = export_df[export_df["ts_code"].isin(ts_codes)]
+        
+        if data_types:
+            export_df = export_df[export_df["data_type"].isin(data_types)]
+        
+        if export_df.empty:
+            logger.warning("没有要导出的缓存数据")
+            return
+        
+        # 复制缓存文件
+        exported_count = 0
+        for _, row in export_df.iterrows():
+            try:
+                src_path = Path(row["path"])
+                if src_path.exists():
+                    # 保持相对路径结构
+                    rel_path = src_path.relative_to(self.cache_dir)
+                    dst_path = output_path / rel_path
+                    dst_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src_path, dst_path)
+                    exported_count += 1
+            except Exception as e:
+                logger.warning(f"导出缓存文件失败 {row['path']}: {e}")
+        
+        # 导出元数据
+        export_df.to_csv(output_path / "metadata.csv", index=False)
+        
+        logger.info(f"缓存导出完成：{exported_count} 个文件 -> {output_dir}")
+
+    def import_cache(self, input_dir: str, merge: bool = True):
+        """
+        P2-3: 导入缓存数据（从备份恢复）
+        
+        Args:
+            input_dir: 输入目录（包含 metadata.csv 和缓存文件）
+            merge: 是否合并到现有缓存（True=合并，False=替换）
+        """
+        import shutil
+        
+        input_path = Path(input_dir)
+        metadata_file = input_path / "metadata.csv"
+        
+        if not metadata_file.exists():
+            logger.error(f"导入失败：未找到元数据文件 {metadata_file}")
+            return False
+        
+        try:
+            # 加载导入的元数据
+            import_df = pd.read_csv(metadata_file)
+            
+            if import_df.empty:
+                logger.warning("导入的元数据为空")
+                return False
+            
+            # 复制缓存文件
+            imported_count = 0
+            for _, row in import_df.iterrows():
+                try:
+                    src_path = input_path / row["path"]
+                    if src_path.exists():
+                        # 复制到本地缓存目录
+                        dst_path = self.cache_dir / src_path.name
+                        shutil.copy2(src_path, dst_path)
+                        
+                        # 更新路径为本地路径
+                        row["path"] = str(dst_path)
+                        
+                        imported_count += 1
+                except Exception as e:
+                    logger.warning(f"导入缓存文件失败 {row['path']}: {e}")
+            
+            # 合并元数据
+            if merge:
+                # 删除已存在的相同 key
+                for key in import_df["key"].unique():
+                    self._metadata = self._metadata[self._metadata["key"] != key]
+                
+                self._metadata = pd.concat([self._metadata, import_df], ignore_index=True)
+            else:
+                self._metadata = import_df
+            
+            self._save_metadata()
+            logger.info(f"缓存导入完成：{imported_count} 个文件从 {input_dir}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"导入缓存失败：{e}")
+            return False

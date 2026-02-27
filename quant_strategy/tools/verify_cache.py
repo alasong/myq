@@ -33,31 +33,31 @@ def setup_logger():
 def verify_cache_data(cache):
     """
     验证缓存数据质量
-    
+
     Returns:
         数据统计 DataFrame
     """
     logger.info("开始验证缓存数据...")
-    
+
     # 获取缓存元数据
     metadata = cache.list_cache()
-    
+
     if metadata.empty:
         logger.warning("缓存为空")
         return pd.DataFrame()
-    
+
     # 只检查 daily 类型数据
     if "data_type" in metadata.columns:
-        daily_cache = metadata[metadata["data_type"] == "daily"]
+        daily_cache = metadata[metadata["data_type"].isin(["daily", "daily_ak"])]
     else:
         daily_cache = metadata
-    
+
     if daily_cache.empty:
         logger.warning("没有缓存日线数据")
         return pd.DataFrame()
-    
+
     logger.info(f"缓存中有 {len(daily_cache)} 只股票数据")
-    
+
     # 统计完整性
     if "is_complete" in daily_cache.columns:
         complete_count = len(daily_cache[daily_cache["is_complete"] == True])
@@ -67,14 +67,33 @@ def verify_cache_data(cache):
         complete_count = 0
         partial_count = len(daily_cache)
         unknown_count = 0
-    
-    logger.info("=" * 60)
-    logger.info("数据完整性统计:")
-    logger.info("=" * 60)
+
+    # 检查重复数据（抽样）
+    sample_size = min(50, len(daily_cache))
+    sample = daily_cache.sample(n=sample_size, random_state=42)
+    duplicate_count = 0
+
+    for _, row in sample.iterrows():
+        try:
+            cache_path = Path(row["path"])
+            if not cache_path.exists():
+                continue
+
+            df = pd.read_parquet(cache_path)
+            if "trade_date" in df.columns and df["trade_date"].duplicated().any():
+                duplicate_count += 1
+        except:
+            continue
+
+    logger.info("=" * 70)
+    logger.info("数据完整性统计 (100% 要求):")
+    logger.info("=" * 70)
     logger.info(f"[OK] 完整数据：{complete_count} 只 ({complete_count/len(daily_cache)*100:.1f}%)")
     logger.info(f"[WARN] 部分数据：{partial_count} 只 ({partial_count/len(daily_cache)*100:.1f}%)")
     logger.info(f"[UNK] 未知标记：{unknown_count} 只 ({unknown_count/len(daily_cache)*100:.1f}%)")
-    
+    if duplicate_count > 0:
+        logger.info(f"[DUP] 抽样发现重复：{duplicate_count} 只 ({duplicate_count/sample_size*100:.1f}%)")
+
     # 显示需要更新的股票示例
     if partial_count > 0 or unknown_count > 0:
         logger.info("")
@@ -85,9 +104,9 @@ def verify_cache_data(cache):
             records = row.get("record_count", "N/A")
             age_days = row.get("age_days", "N/A") if "age_days" in row else "N/A"
             logger.info(f"  {ts_code}: {records}条记录，缓存{age_days}天")
-    
-    logger.info("=" * 60)
-    
+
+    logger.info("=" * 70)
+
     # 返回统计信息
     return pd.DataFrame({
         "status": ["complete", "partial", "unknown"],

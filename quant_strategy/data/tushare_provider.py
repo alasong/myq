@@ -225,7 +225,13 @@ class TushareDataProvider:
     def get_daily_data(self, ts_code: str, start_date: str, end_date: str,
                        adj: str = "qfq") -> pd.DataFrame:
         """
-        获取股票日线数据
+        获取股票日线数据（历史数据本地持久化，只实时获取新数据）
+
+        策略：
+        1. 优先从本地缓存读取历史数据
+        2. 检测是否有新数据需要获取（最新交易日到 end_date）
+        3. 只实时获取新数据，然后与历史数据合并
+        4. 所有获取的数据都保存到本地
 
         Args:
             ts_code: 股票代码，如 "000001.SZ"
@@ -239,66 +245,238 @@ class TushareDataProvider:
         params = {"ts_code": ts_code, "start": start_date, "end": end_date, "adj": adj}
         cache_key_params = params.copy()
 
-        # 计算预期交易日天数（使用实际交易日日历）
-        expected_days = self._calc_expected_trading_days(ts_code, start_date, end_date)
-
+        # 1. 尝试从缓存获取全部数据
         if self.use_cache:
-            cached = self.cache.get("daily", cache_key_params, start_date, end_date, expected_days=expected_days)
-            if cached is not None:
-                logger.debug(f"缓存命中（完整数据）：{ts_code}")
+            cached = self.cache.get("daily", cache_key_params, start_date, end_date)
+            if cached is not None and not cached.empty:
+                logger.debug(f"缓存命中：{ts_code}")
                 return cached
 
+        # 2. 缓存未命中，尝试获取该股票的所有历史数据（全量持久化）
+        df = self._get_full_history(ts_code, start_date, end_date, adj)
+
+        if df is not None and not df.empty:
+            return df
+
+        # 3. 全量获取失败，降级为直接获取请求范围的数据
+        logger.warning(f"{ts_code}: 全量获取失败，降级为直接获取 {start_date}-{end_date}")
+        return self._fetch_daily_range(ts_code, start_date, end_date, adj, cache_key_params)
+
+    def _get_full_history(self, ts_code: str, start_date: str, end_date: str, adj: str) -> pd.DataFrame:
+        """
+        获取股票全部历史数据（持久化策略）
+
+        逻辑：
+        1. 从缓存加载已有的历史数据
+        2. 检查是否有新数据（从最后交易日到 end_date）
+        3. 只获取新数据，与历史数据合并
+        4. 保存到缓存
+
+        Args:
+            ts_code: 股票代码
+            start_date: 开始日期
+            end_date: 结束日期
+            adj: 复权类型
+
+        Returns:
+            合并后的数据
+        """
+        # 使用全量缓存键（不按日期范围）
+        full_cache_params = {"ts_code": ts_code, "adj": adj}
+
+        try:
+            # 1. 尝试从缓存获取该股票的全部历史数据
+            historical_df = self.cache.get("daily_full", full_cache_params)
+
+            if historical_df is not None and not historical_df.empty:
+                # 2. 检查是否有新数据
+                last_date = historical_df.index.max().strftime('%Y%m%d')
+                need_update = last_date < end_date
+
+                if not need_update:
+                    # 无需更新，直接返回请求范围的数据
+                    logger.debug(f"{ts_code}: 使用缓存历史数据（{len(historical_df)}天）")
+                    mask = (historical_df.index >= pd.to_datetime(start_date, format='%Y%m%d')) & \
+                           (historical_df.index <= pd.to_datetime(end_date, format='%Y%m%d'))
+                    return historical_df[mask]
+
+                # 3. 获取新数据（从最后交易日+1 到 end_date）
+                new_start = (pd.to_datetime(last_date, format='%Y%m%d') + pd.Timedelta(days=1)).strftime('%Y%m%d')
+                logger.info(f"{ts_code}: 获取新数据 {new_start}-{end_date}")
+
+                new_df = self._fetch_daily_range(ts_code, new_start, end_date, adj,
+                                                 {"ts_code": ts_code, "start": new_start, "end": end_date, "adj": adj})
+
+                if new_df is not None and not new_df.empty:
+                    # 4. 合并历史数据和新数据
+                    combined_df = pd.concat([historical_df, new_df])
+                    combined_df = combined_df[~combined_df.index.duplicated(keep='first')]
+                    combined_df = combined_df.sort_index()
+
+                    # 5. 保存全量数据到缓存
+                    self.cache.set("daily_full", full_cache_params, combined_df, is_complete=True)
+                    logger.info(f"{ts_code}: 已更新历史数据（{len(combined_df)}天）")
+
+                    # 返回请求范围的数据
+                    mask = (combined_df.index >= pd.to_datetime(start_date, format='%Y%m%d')) & \
+                           (combined_df.index <= pd.to_datetime(end_date, format='%Y%m%d'))
+                    return combined_df[mask]
+
+                return historical_df
+
+            else:
+                # 无缓存，获取全部历史数据
+                logger.info(f"{ts_code}: 首次获取全部历史数据")
+                return self._fetch_all_history(ts_code, start_date, end_date, adj, full_cache_params)
+
+        except Exception as e:
+            # P1-2: 增强错误处理，区分错误类型
+            error_msg = str(e)
+            if "积分" in error_msg or "积分不足" in error_msg:
+                logger.error(f"{ts_code}: 积分不足，需要升级 Tushare 会员")
+            elif "limit" in error_msg.lower() or "限流" in error_msg:
+                logger.error(f"{ts_code}: API 调用次数超限，请稍后重试")
+            elif "权限" in error_msg or "vip" in error_msg.lower():
+                logger.error(f"{ts_code}: 权限不足，需要升级 Tushare 会员级别")
+            else:
+                logger.error(f"{ts_code}: 获取历史数据失败：{e}")
+            return None
+
+    def _fetch_all_history(self, ts_code: str, start_date: str, end_date: str,
+                           adj: str, cache_params: dict) -> pd.DataFrame:
+        """
+        首次获取股票全部历史数据（从上市日期到 end_date）
+
+        Args:
+            ts_code: 股票代码
+            start_date: 开始日期（请求的，不影响获取范围）
+            end_date: 结束日期
+            adj: 复权类型
+            cache_params: 缓存参数
+
+        Returns:
+            历史数据 DataFrame
+        """
+        try:
+            # 1. 获取股票基本信息（包含上市日期）
+            try:
+                stock_info = self.pro.stock_basic(ts_code=ts_code, fields="ts_code,list_date")
+                if stock_info is not None and not stock_info.empty:
+                    list_date_str = stock_info['list_date'].iloc[0]
+                    # 转换上市日期格式 YYYYMMDD
+                    if pd.notna(list_date_str):
+                        list_date = str(list_date_str)
+                        if len(list_date) == 8:
+                            # 已经是 YYYYMMDD 格式
+                            pass
+                        else:
+                            # 可能是其他格式，尝试转换
+                            list_date = pd.to_datetime(list_date_str).strftime('%Y%m%d')
+                    else:
+                        list_date = start_date  # 无法获取上市日期，使用请求的开始日期
+                else:
+                    list_date = start_date  # 无法获取股票信息，使用请求的开始日期
+            except Exception as e:
+                logger.debug(f"{ts_code}: 获取上市日期失败：{e}，使用请求的开始日期")
+                list_date = start_date
+
+            # 2. 从上市日期开始获取全部历史数据
+            logger.info(f"{ts_code}: 从上市日期 ({list_date}) 获取全部历史数据")
+            
+            if adj:
+                adj_factor = self.get_adj_factor(ts_code, list_date, end_date)
+                df = self.pro.daily(
+                    ts_code=ts_code,
+                    start_date=list_date,
+                    end_date=end_date
+                )
+                df = self._apply_adj_factor(df, adj_factor, adj)
+            else:
+                df = self.pro.daily(
+                    ts_code=ts_code,
+                    start_date=list_date,
+                    end_date=end_date
+                )
+
+            # 3. 处理数据
+            df = self._process_daily(df, ts_code)
+
+            if df is not None and not df.empty:
+                # 4. 保存全量数据到缓存
+                self.cache.set("daily_full", {"ts_code": ts_code, "adj": adj}, df, is_complete=True)
+                logger.info(f"{ts_code}: 已保存历史数据（{len(df)}天，从{list_date}到{end_date}）")
+
+            return df
+
+        except Exception as e:
+            # P1-2: 增强错误处理，区分错误类型
+            error_msg = str(e)
+            if "积分" in error_msg or "积分不足" in error_msg:
+                logger.error(f"{ts_code}: 积分不足，需要升级 Tushare 会员")
+            elif "limit" in error_msg.lower() or "限流" in error_msg:
+                logger.error(f"{ts_code}: API 调用次数超限，请稍后重试")
+            elif "权限" in error_msg or "vip" in error_msg.lower():
+                logger.error(f"{ts_code}: 权限不足，需要升级 Tushare 会员级别")
+            elif "网络" in error_msg or "timeout" in error_msg.lower():
+                logger.error(f"{ts_code}: 网络错误，请检查网络连接")
+            else:
+                logger.error(f"{ts_code}: 获取历史数据失败：{e}")
+            return pd.DataFrame()
+
+    def _fetch_daily_range(self, ts_code: str, start_date: str, end_date: str,
+                           adj: str, cache_params: dict) -> pd.DataFrame:
+        """
+        获取指定日期范围的日线数据
+
+        Args:
+            ts_code: 股票代码
+            start_date: 开始日期
+            end_date: 结束日期
+            adj: 复权类型
+            cache_params: 缓存参数
+
+        Returns:
+            日线数据 DataFrame
+        """
         try:
             if adj:
-                # 获取复权因子
                 adj_factor = self.get_adj_factor(ts_code, start_date, end_date)
                 df = self.pro.daily(
                     ts_code=ts_code,
                     start_date=start_date,
-                    end_date=end_date,
-                    fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount"
+                    end_date=end_date
                 )
-                # 应用复权
                 df = self._apply_adj_factor(df, adj_factor, adj)
             else:
                 df = self.pro.daily(
                     ts_code=ts_code,
                     start_date=start_date,
-                    end_date=end_date,
-                    fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount"
+                    end_date=end_date
                 )
 
-            # 处理数据格式（包含重复数据检测和清理）
+            # 处理数据（包含重复数据清理）
             df = self._process_daily(df, ts_code)
 
-            if self.use_cache:
-                # 检查数据完整性（100% 要求）
-                actual_days = len(df)
-                
-                # 检测重复数据
-                duplicates = df.index.duplicated().sum()
-                if duplicates > 0:
-                    logger.warning(f"{ts_code}: 检测到 {duplicates} 条重复数据，已清理")
-                    df = df[~df.index.duplicated(keep='first')]
-                    actual_days = len(df)
-                
-                # 100% 完整度要求
-                is_complete = (actual_days == expected_days)
-                
-                # 超过 100% 说明有异常数据
-                if actual_days > expected_days:
-                    logger.warning(f"{ts_code}: 数据异常！实际{actual_days}天 > 预期{expected_days}天，可能存在重复")
-                    # 尝试清理重复
-                    df = df[~df.index.duplicated(keep='first')]
-                    actual_days = len(df)
-                    is_complete = (actual_days == expected_days)
-                
-                self.cache.set("daily", cache_key_params, df, is_complete=is_complete)
-                logger.info(f"获取数据：{ts_code} ({actual_days}/{expected_days}天，完整={is_complete})")
+            if df is not None and not df.empty:
+                # 保存到缓存（按日期范围）
+                self.cache.set("daily", cache_params, df, is_complete=True)
+                logger.info(f"{ts_code}: 获取数据（{len(df)}天）")
 
             return df
+
         except Exception as e:
-            logger.error(f"获取日线数据失败 {ts_code}: {e}")
+            # P1-2: 增强错误处理，区分错误类型
+            error_msg = str(e)
+            if "积分" in error_msg or "积分不足" in error_msg:
+                logger.error(f"{ts_code}: 积分不足，需要升级 Tushare 会员")
+            elif "limit" in error_msg.lower() or "限流" in error_msg:
+                logger.error(f"{ts_code}: API 调用次数超限，请稍后重试")
+            elif "权限" in error_msg or "vip" in error_msg.lower():
+                logger.error(f"{ts_code}: 权限不足，需要升级 Tushare 会员级别")
+            elif "网络" in error_msg or "timeout" in error_msg.lower():
+                logger.error(f"{ts_code}: 网络错误，请检查网络连接")
+            else:
+                logger.error(f"{ts_code}: 获取日线数据失败：{e}")
             return pd.DataFrame()
     
     def _apply_adj_factor(self, df: pd.DataFrame, adj_factor: pd.DataFrame, adj_type: str) -> pd.DataFrame:
@@ -312,7 +490,7 @@ class TushareDataProvider:
 
         df = df.merge(adj_factor[["trade_date", "adj_factor"]], on="trade_date", how="left")
         df["adj_factor"] = df["adj_factor"].fillna(1.0)
-        
+
         if adj_type == "qfq":
             # 前复权
             base_factor = df["adj_factor"].iloc[-1] if len(df) > 0 else 1.0
@@ -322,25 +500,113 @@ class TushareDataProvider:
             # 后复权
             for col in ["open", "high", "low", "close", "pre_close"]:
                 df[col] = df[col] * df["adj_factor"]
-        
+
         df = df.drop(columns=["adj_factor"])
         return df
-    
-    def _process_daily(self, df: pd.DataFrame) -> pd.DataFrame:
-        """处理日线数据格式"""
+
+    def _validate_data(self, df: pd.DataFrame, ts_code: str, start_date: str, end_date: str) -> dict:
+        """
+        P2-1: 验证数据完整性
+        
+        Args:
+            df: 要验证的数据
+            ts_code: 股票代码
+            start_date: 开始日期
+            end_date: 结束日期
+            
+        Returns:
+            验证结果字典
+        """
+        result = {
+            "is_valid": True,
+            "missing_dates": [],
+            "zero_prices": False,
+            "issues": []
+        }
+        
+        if df.empty:
+            result["is_valid"] = False
+            result["issues"].append("数据为空")
+            return result
+        
+        # 1. 检查日期连续性
+        expected_dates = self._get_trade_dates(start_date, end_date)
+        actual_dates = [d.strftime('%Y%m%d') for d in df.index]
+        
+        missing_dates = set(expected_dates) - set(actual_dates)
+        if missing_dates:
+            result["missing_dates"] = list(missing_dates)
+            result["issues"].append(f"缺失 {len(missing_dates)} 个交易日")
+            result["is_valid"] = False
+            logger.warning(f"{ts_code}: 缺失 {len(missing_dates)} 个交易日")
+        
+        # 2. 检查数据质量（零价格）
+        if 'close' in df.columns and (df['close'] == 0).any():
+            result["zero_prices"] = True
+            result["issues"].append("存在零价格")
+            logger.warning(f"{ts_code}: 存在零价格")
+        
+        # 3. 检查 NaN 值
+        nan_count = df.isna().sum().sum()
+        if nan_count > 0:
+            result["issues"].append(f"存在 {nan_count} 个 NaN 值")
+            logger.warning(f"{ts_code}: 存在 {nan_count} 个 NaN 值")
+        
+        return result
+
+    def _get_trade_dates(self, start_date: str, end_date: str) -> List[str]:
+        """
+        P2-1: 获取指定日期范围内的交易日列表
+        
+        Args:
+            start_date: 开始日期 YYYYMMDD
+            end_date: 结束日期 YYYYMMDD
+            
+        Returns:
+            交易日列表
+        """
+        try:
+            # 获取交易所（默认 SSE）
+            trade_cal = self.get_trade_cal(exchange="SSE", start_date=start_date, end_date=end_date)
+            if trade_cal is not None and not trade_cal.empty:
+                return trade_cal["cal_date"].tolist()
+        except Exception as e:
+            logger.debug(f"获取交易日历失败：{e}")
+        
+        # 无法获取交易日历时，返回空列表
+        return []
+
+    def _process_daily(self, df: pd.DataFrame, ts_code: str = None) -> pd.DataFrame:
+        """
+        处理日线数据格式（包含重复数据清理）
+        
+        Args:
+            df: 原始数据
+            ts_code: 股票代码（用于日志）
+        
+        Returns:
+            处理后的数据
+        """
         if df.empty:
             return df
-        
+
         df = df.sort_values("trade_date").reset_index(drop=True)
         df["trade_date"] = pd.to_datetime(df["trade_date"], format="%Y%m%d")
-        df.set_index("trade_date", inplace=True)
         
+        # 检测重复日期
+        duplicates = df["trade_date"].duplicated().sum()
+        if duplicates > 0:
+            logger.warning(f"{ts_code or '未知'}: 检测到 {duplicates} 条重复日期数据，保留第一条")
+            df = df.drop_duplicates(subset="trade_date", keep="first")
+        
+        df.set_index("trade_date", inplace=True)
+
         # 确保数值列类型正确
         numeric_cols = ["open", "high", "low", "close", "vol", "amount", "pre_close", "change", "pct_chg"]
         for col in numeric_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
-        
+
         return df
     
     def get_adj_factor(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -398,17 +664,17 @@ class TushareDataProvider:
         
         return df
     
-    def get_multiple_stocks(self, ts_codes: List[str], start_date: str, 
+    def get_multiple_stocks(self, ts_codes: List[str], start_date: str,
                            end_date: str, adj: str = "qfq") -> dict:
         """
         批量获取多只股票数据
-        
+
         Args:
             ts_codes: 股票代码列表
             start_date: 开始日期
             end_date: 结束日期
             adj: 复权类型
-            
+
         Returns:
             {ts_code: DataFrame} 字典
         """
@@ -418,7 +684,39 @@ class TushareDataProvider:
             if not df.empty:
                 result[ts_code] = df
         return result
-    
+
+    def prefetch_cache(self, ts_codes: List[str], start_date: str, end_date: str, adj: str = "qfq"):
+        """
+        P2-4: 预加载多只股票的缓存（用于批量回测前预加载）
+        
+        Args:
+            ts_codes: 股票代码列表
+            start_date: 开始日期
+            end_date: 结束日期
+            adj: 复权类型
+        """
+        logger.info(f"预加载缓存：{len(ts_codes)} 只股票，{start_date}-{end_date}")
+        
+        hit_count = 0
+        miss_count = 0
+        
+        for ts_code in tqdm(ts_codes, desc="预加载缓存"):
+            full_params = {"ts_code": ts_code, "adj": adj}
+            cached = self.cache.get("daily_full", full_params)
+            
+            if cached is not None and not cached.empty:
+                # 检查缓存是否需要更新
+                last_date = cached.index.max().strftime('%Y%m%d') if not cached.empty else None
+                if last_date and last_date >= end_date:
+                    hit_count += 1
+                else:
+                    # 缓存需要更新，先加载旧数据
+                    miss_count += 1
+            else:
+                miss_count += 1
+        
+        logger.info(f"预加载完成：命中 {hit_count}/{len(ts_codes)}，需要更新 {miss_count}/{len(ts_codes)}")
+
     def get_suspended(self, ts_code: str = None, start_date: str = None,
                       end_date: str = None) -> pd.DataFrame:
         """获取股票停牌数据"""
