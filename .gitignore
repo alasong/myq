@@ -35,7 +35,7 @@ ENV/
 
 # 数据缓存
 # data_cache/
-*.parquet
+# *.parquet
 
 # 日志
 logs/
