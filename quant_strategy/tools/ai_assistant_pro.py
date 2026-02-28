@@ -48,6 +48,117 @@ from quant_strategy.modules.base import get_module_registry, ModuleRegistry
 from quant_strategy.modules.data_module import DataModule
 from quant_strategy.modules.strategy_module import StrategyModule
 
+# 尝试导入 LLM 意图识别器
+try:
+    from quant_strategy.tools.llm_intent import LLMIntentRecognizer, get_llm_recognizer
+    LLM_AVAILABLE = True
+except (ImportError, Exception):
+    LLM_AVAILABLE = False
+    logger.info("LLM 意图识别器不可用，将使用规则引擎")
+
+
+# ============== 意图识别配置 ==============
+
+INTENT_KEYWORDS = {
+    'download': {
+        'high': ['下载', '获取', 'fetch', 'download', 'get', '抓取', '拉取', '采集'],
+        'medium': ['拿', '取', '抓', '拉', '收', '同步', '导入'],
+        'low': ['看', '查', '查看', '需要', '要', '帮我', '给我'],
+        'objects': ['数据', '股票', '行情', 'K 线', '走势', '历史'],
+    },
+    'update': {
+        'high': ['更新', '刷新', '同步', 'update', 'refresh', '补充'],
+        'medium': ['补', '新', '最新的', '最近的', '最新'],
+        'low': ['不准', '过时', '旧', '缺少'],
+        'objects': ['数据', '股票', '行情'],
+    },
+    'status': {
+        'high': ['状态', '缓存', 'status', '统计', '多少', '多大'],
+        'medium': ['看看', '查查', '检查', '查看', '查询', '显示'],
+        'low': ['有', '多少', '大小', '空间'],
+        'objects': ['缓存', '数据', '股票', '文件'],
+    },
+    'cleanup': {
+        'high': ['清理', '清除', '删除', 'clean', 'delete', '清空', '丢掉'],
+        'medium': ['删', '丢', '扔', '清', '移除', '擦除'],
+        'low': ['旧', '过期', '不要', '没用', '垃圾'],
+        'objects': ['缓存', '数据', '空间', '文件'],
+    },
+    'backtest': {
+        'high': ['回测', '回溯', 'backtest', '历史测试'],
+        'medium': ['测试', '验证', '试试', '跑一下', '执行'],
+        'low': ['策略', '效果', '表现', '收益', '胜率'],
+        'objects': ['策略', '双均线', '动量', 'KDJ', 'RSI'],
+    },
+    'workflow': {
+        'high': ['然后', '接着', '再', '之后', 'and then', '&&'],
+        'medium': ['并', '且', '同时', '一起'],
+        'low': ['先', '后'],
+        'objects': [],
+    },
+}
+
+# 意图同义词映射
+INTENT_SYNONYMS = {
+    # 下载相关
+    '帮我拿下': 'download',
+    '帮我获取': 'download',
+    '帮我下载': 'download',
+    '给我下': 'download',
+    '我要下': 'download',
+    '我想要': 'download',
+    '需要': 'download',
+    '下载': 'download',
+    '获取': 'download',
+    
+    # 查看相关（但如果有"走势/数据"等词，应该是下载）
+    '看看': 'status',
+    '查查': 'status',
+    '看一下': 'status',
+    '瞅一眼': 'status',
+    '显示': 'status',
+    '展示': 'status',
+    
+    # 更新相关
+    '刷新下': 'update',
+    '更新下': 'update',
+    '同步下': 'update',
+    '补一下': 'update',
+    '补齐': 'update',
+    '刷新': 'update',
+    '更新': 'update',
+    
+    # 清理相关
+    '清一下': 'cleanup',
+    '删一下': 'cleanup',
+    '清一清': 'cleanup',
+    '删掉': 'cleanup',
+    '丢掉': 'cleanup',
+    '清理': 'cleanup',
+    '清除': 'cleanup',
+    
+    # 回测相关
+    '测一下': 'backtest',
+    '跑一下': 'backtest',
+    '回测下': 'backtest',
+    '回测': 'backtest',
+}
+
+# 工作流动词序列
+WORKFLOW_PATTERNS = [
+    r'(.+?)\s*，\s*然后\s*(.+?)',
+    r'(.+?)\s*，\s*接着\s*(.+?)',
+    r'(.+?)\s*，\s*再\s*(.+?)',
+    r'(.+?)\s*，\s*之后\s*(.+?)',
+    r'(.+?)\s*；\s*(.+?)',
+    r'(.+?)\s*;\s*(.+?)',
+    r'(.+?)\s*，\s*并\s*(.+?)',
+    r'(.+?)\s*并\s*(.+?)',
+    r'先\s*(.+?)\s*，\s*再\s*(.+?)',
+    r'(.+?)\s*，\s*后\s*(.+?)',  # "下完做个回测"
+    r'(.+?)\s*完\s*(.+?)',       # "下完做个回测"
+]
+
 
 # ============== 样式定义 ==============
 
@@ -147,7 +258,19 @@ class AIAssistantPro:
             'commands_failed': 0,
             'start_time': datetime.now()
         }
-        
+
+        # 初始化 LLM 意图识别器
+        self.llm_recognizer = None
+        if LLM_AVAILABLE:
+            try:
+                self.llm_recognizer = get_llm_recognizer()
+                if self.llm_recognizer.available:
+                    logger.info("LLM 意图识别器已启用")
+                else:
+                    logger.info("LLM 意图识别器不可用（API 密钥未设置）")
+            except Exception as e:
+                logger.warning(f"LLM 意图识别器初始化失败：{e}")
+
         print_status("正在初始化...", 'loading')
         self._init_data_source()
         self._init_modules()
@@ -175,45 +298,161 @@ class AIAssistantPro:
         # 这里可以动态加载更多模块
         pass
     
+    def _recognize_intent(self, command: str) -> tuple:
+        """
+        识别用户意图（混合路由）
+        返回：(action, confidence)
+        """
+        # 1. 优先尝试 LLM（如果可用且命令复杂）
+        if LLM_AVAILABLE and self.llm_recognizer and self.llm_recognizer.available:
+            # 简单命令直接用规则引擎（快速路径）
+            if not self._is_complex_command(command):
+                pass  # 跳过 LLM，用规则引擎
+            else:
+                llm_result = self.llm_recognizer.recognize(command)
+                if llm_result['action'] != 'unknown' and llm_result['confidence'] >= 0.6:
+                    return llm_result['action'], llm_result['confidence']
+        
+        # 2. 规则引擎（兜底）
+        return self._rule_based_recognize(command)
+    
+    def _is_complex_command(self, command: str) -> bool:
+        """判断是否是复杂命令（需要 LLM 处理）"""
+        # 包含多个动作
+        action_count = sum(1 for w in ['下载', '更新', '清理', '回测', '分析'] if w in command)
+        if action_count >= 2:
+            return True
+        
+        # 长命令（超过 15 个字）
+        if len(command) > 25:
+            return True
+        
+        # 包含模糊表达
+        fuzzy_words = ['可能', '应该', '好像', '大概', '说不定', '帮我', '给我', '想要']
+        if any(w in command for w in fuzzy_words):
+            return True
+        
+        # 包含口语化表达
+        colloquial_words = ['看一下', '瞅一眼', '弄一下', '搞一下', '试试看']
+        if any(w in command for w in colloquial_words):
+            return True
+        
+        return False
+    
+    def _rule_based_recognize(self, command: str) -> tuple:
+        """基于规则的意图识别（兜底）"""
+        command_lower = command.lower()
+        
+        # 1. 检查同义词映射
+        for synonym, intent in INTENT_SYNONYMS.items():
+            if synonym in command_lower:
+                # 上下文修正：如果有"走势/数据/行情/K 线"等词，"看看"应该是下载
+                if intent == 'status' and any(w in command for w in ['走势', '数据', '行情', 'K 线']):
+                    return 'download', 0.7
+                # 特殊修正："看看有多少/多大/多少"是查询状态
+                if intent == 'status' and any(w in command for w in ['多少', '多大', '有', '状态']):
+                    return 'status', 0.9
+                # 特殊修正："看看股票"（没有"走势/数据"）是查询状态
+                if intent == 'status' and '股票' in command and '走势' not in command and '数据' not in command:
+                    return 'status', 0.8
+                return intent, 0.8
+        
+        # 2. 检查工作流模式（优先于其他意图）
+        for pattern in WORKFLOW_PATTERNS:
+            match = re.search(pattern, command)
+            if match:
+                # 检查工作流是否包含"回测"等动作
+                second_part = match.group(2) if match.lastindex >= 2 else ''
+                if '回测' in second_part or '测' in second_part:
+                    return 'workflow', 0.95
+                return 'workflow', 0.9
+        
+        # 3. 基于关键词的意图识别（带置信度）
+        intent_scores = {}
+        
+        for intent, keywords in INTENT_KEYWORDS.items():
+            score = 0.0
+            
+            # 高置信度关键词匹配
+            for word in keywords['high']:
+                if word in command_lower:
+                    score = max(score, 0.9)
+                    break
+            
+            # 中置信度关键词匹配
+            if score < 0.9:
+                for word in keywords['medium']:
+                    if word in command_lower:
+                        score = max(score, 0.7)
+                        break
+            
+            # 低置信度关键词匹配（需要上下文）
+            if score < 0.7:
+                for word in keywords['low']:
+                    if word in command_lower:
+                        # 检查是否有相关对象
+                        has_object = any(obj in command for obj in keywords.get('objects', []))
+                        if has_object:
+                            score = max(score, 0.6)
+                        else:
+                            score = max(score, 0.3)
+                        break
+            
+            if score > 0:
+                intent_scores[intent] = score
+        
+        # 返回最高分数的意图
+        if intent_scores:
+            best_intent = max(intent_scores, key=intent_scores.get)
+            return best_intent, intent_scores[best_intent]
+        
+        return 'unknown', 0.0
+
     def parse_command(self, command: str) -> dict:
         """解析命令"""
         command = command.strip()
-        
+
         result = {
             'type': 'unknown',  # module, ai, system
             'action': None,
             'module': None,
             'params': {},
-            'raw': command
+            'raw': command,
+            'confidence': 0.0  # 添加置信度
         }
-        
+
         # 1. 系统命令
         if command.lower() in ['quit', 'exit', 'q', '退出']:
             result['type'] = 'system'
             result['action'] = 'quit'
+            result['confidence'] = 1.0
             return result
-        
+
         if command.lower() in ['help', 'h', '?', '帮助']:
             result['type'] = 'system'
             result['action'] = 'help'
+            result['confidence'] = 1.0
             return result
-        
+
         if command.lower() in ['modules', 'mods', '模块列表']:
             result['type'] = 'system'
             result['action'] = 'list_modules'
+            result['confidence'] = 1.0
             return result
-        
+
         if command.lower() in ['status', '状态']:
             result['type'] = 'system'
             result['action'] = 'status'
+            result['confidence'] = 1.0
             return result
-        
+
         # 2. 模块调用 (module:action 格式)
         module_match = re.match(r'^(\w+):(\w+)(?:\s+(.*))?$', command)
         if module_match:
             result['type'] = 'module'
             result['module'] = module_match.group(1)
             result['action'] = module_match.group(2)
+            result['confidence'] = 1.0
             params_str = module_match.group(3)
             if params_str:
                 # 解析参数 key=value 格式
@@ -222,55 +461,76 @@ class AIAssistantPro:
                         k, v = param.split('=', 1)
                         result['params'][k] = v
             return result
-        
+
         # 3. AI 自然语言命令
         result['type'] = 'ai'
+
+        # 使用增强的意图识别
+        action, confidence = self._recognize_intent(command)
+        result['action'] = action
+        result['confidence'] = confidence
         
-        # 识别动作
-        if any(word in command for word in ['下载', '获取', 'get', 'download', 'fetch']):
-            result['action'] = 'download'
-        elif any(word in command for word in ['查看', '状态', 'status', 'check', 'list', '缓存']):
-            result['action'] = 'status'
-        elif any(word in command for word in ['清理', '清除', 'clean', 'clear', 'delete']):
-            result['action'] = 'cleanup'
-        elif any(word in command for word in ['帮助', 'help', 'usage']):
-            result['action'] = 'help'
-        elif any(word in command for word in ['更新', 'update', 'refresh']):
-            result['action'] = 'update'
-        elif any(word in command for word in ['策略', 'strategy']):
-            result['action'] = 'strategy'
-        elif any(word in command for word in ['数据', 'data', '股票']):
-            result['action'] = 'data'
-        else:
-            result['action'] = 'unknown'
-        
-        # 识别日期
+        # 识别日期范围 - 支持多种格式
+        # 格式 1: 20240101-20241231 (8 位日期)
+        date_range_match = re.search(r'(\d{8})[\s\-~到至](\d{8})', command)
+        if date_range_match:
+            result['params']['start_date'] = date_range_match.group(1)
+            result['params']['end_date'] = date_range_match.group(2)
+
+        # 格式 2: 240101-241231 (6 位日期，年份简写)
+        elif re.search(r'\b(\d{6})[\s\-~到至](\d{6})\b', command):
+            short_match = re.search(r'\b(\d{6})[\s\-~到至](\d{6})\b', command)
+            if short_match:
+                start = short_match.group(1)
+                end = short_match.group(2)
+                # 年份推断：前 2 位 < 50 则为 20xx，否则为 19xx
+                start_yy = int(start[:2])
+                end_yy = int(end[:2])
+                start_century = '20' if start_yy < 50 else '19'
+                end_century = '20' if end_yy < 50 else '19'
+                result['params']['start_date'] = f"{start_century}{start}"
+                result['params']['end_date'] = f"{end_century}{end}"
+
+        # 识别年份
         year_match = re.search(r'(20\d{2})\s*年', command)
         if year_match:
             year = year_match.group(1)
             result['params']['start_date'] = year + '0101'
             result['params']['end_date'] = year + '1231'
-        
+
         if '今年' in command:
             year = str(datetime.now().year)
             result['params']['start_date'] = year + '0101'
             result['params']['end_date'] = year + '1231'
-        
+
         if '去年' in command:
             year = str(datetime.now().year - 1)
             result['params']['start_date'] = year + '0101'
             result['params']['end_date'] = year + '1231'
-        
+
         # 识别线程数
         workers_match = re.search(r'(\d+)\s*线程', command)
         if workers_match:
             result['params']['workers'] = min(max(int(workers_match.group(1)), 1), 8)
-        
+
         # 识别股票代码
         code_match = re.search(r'(\d{6}\.(SZ|SH|BJ))', command, re.IGNORECASE)
         if code_match:
             result['params']['ts_code'] = code_match.group(1).upper()
-        
+
+        # 股票名映射
+        stock_names = {
+            '茅台': '600519.SH',
+            '平安银行': '000001.SZ',
+            '万科': '000002.SZ',
+            '宁德': '300750.SZ',
+            '比亚迪': '002594.SZ',
+        }
+        for name, code in stock_names.items():
+            if name in command:
+                result['params']['ts_code'] = code
+                break
+
         return result
     
     def execute(self, command: str) -> bool:

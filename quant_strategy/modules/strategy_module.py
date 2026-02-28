@@ -69,34 +69,82 @@ class StrategyModule(BaseModule):
                 error=str(e)
             )
     
-    def list_strategies(self, **kwargs) -> ModuleResult:
+    def list_strategies(self, by_category: bool = True, **kwargs) -> ModuleResult:
         """列出所有策略"""
         try:
-            from quant_strategy.strategy import (
-                DualMAStrategy, MomentumStrategy,
-                KDJStrategy, RSIStrategy, BOLLStrategy,
-                DMIStrategy, CCIStrategy, MACDStrategy, VolumePriceStrategy
-            )
-            
-            strategies = {
-                'dual_ma': {'name': '双均线策略', 'class': 'DualMAStrategy'},
-                'momentum': {'name': '动量策略', 'class': 'MomentumStrategy'},
-                'kdj': {'name': 'KDJ 策略', 'class': 'KDJStrategy'},
-                'rsi': {'name': 'RSI 策略', 'class': 'RSIStrategy'},
-                'boll': {'name': '布林线策略', 'class': 'BOLLStrategy'},
-                'dmi': {'name': 'DMI 策略', 'class': 'DMIStrategy'},
-                'cci': {'name': 'CCI 策略', 'class': 'CCIStrategy'},
-                'macd': {'name': 'MACD 策略', 'class': 'MACDStrategy'},
-                'volume_price': {'name': '量价策略', 'class': 'VolumePriceStrategy'},
+            # 策略分类定义
+            strategies_by_category = {
+                "趋势跟踪": {
+                    'dual_ma': {'name': '双均线策略', 'class': 'DualMAStrategy', 'desc': '短线/长线均线交叉'},
+                    'momentum': {'name': '动量策略', 'class': 'MomentumStrategy', 'desc': '基于价格动量'},
+                },
+                "震荡指标": {
+                    'kdj': {'name': 'KDJ 策略', 'class': 'KDJStrategy', 'desc': '随机指标，适合震荡市'},
+                    'rsi': {'name': 'RSI 策略', 'class': 'RSIStrategy', 'desc': '相对强弱指标'},
+                    'cci': {'name': 'CCI 策略', 'class': 'CCIStrategy', 'desc': '商品通道指标'},
+                },
+                "波动率指标": {
+                    'boll': {'name': '布林线策略', 'class': 'BOLLStrategy', 'desc': '基于标准差通道'},
+                    'dmi': {'name': 'DMI 策略', 'class': 'DMIStrategy', 'desc': '方向移动指标'},
+                },
+                "趋势动量": {
+                    'macd': {'name': 'MACD 策略', 'class': 'MACDStrategy', 'desc': '移动平均收敛发散'},
+                },
+                "量价分析": {
+                    'volume_price': {'name': '量价策略', 'class': 'VolumePriceStrategy', 'desc': '成交量与价格结合'},
+                },
+                "情绪指标": {
+                    'sentiment': {'name': '情绪策略', 'class': 'SentimentStrategy', 'desc': '市场情绪分析'},
+                    'fear_greed': {'name': '恐慌贪婪策略', 'class': 'FearGreedStrategy', 'desc': '恐慌贪婪指数'},
+                    'volume_sentiment': {'name': '量能情绪策略', 'class': 'VolumeSentimentStrategy', 'desc': '成交量情绪'},
+                    'open_interest': {'name': '持仓量策略', 'class': 'OpenInterestStrategy', 'desc': '期货持仓量分析'},
+                },
+                "板块轮动": {
+                    'sector_momentum': {'name': '板块动量策略', 'class': 'SectorMomentumRotationStrategy', 'desc': '板块动量轮动'},
+                    'sector_flow': {'name': '板块资金流策略', 'class': 'SectorFlowStrategy', 'desc': '板块资金流向'},
+                },
+                "涨停板": {
+                    'first_limit_up': {'name': '首板策略', 'class': 'FirstLimitUpStrategy', 'desc': '首个涨停板捕捉'},
+                    'continuous_limit_up': {'name': '连板策略', 'class': 'ContinuousLimitUpStrategy', 'desc': '连续涨停板'},
+                    'limit_up_pullback': {'name': '涨停回调策略', 'class': 'LimitUpPullbackStrategy', 'desc': '涨停后回调'},
+                },
             }
-            
+
+            # 统计总数
+            total_count = sum(len(strats) for strats in strategies_by_category.values())
+
+            # 构建返回数据
+            if by_category:
+                data = {
+                    category: {
+                        key: {'name': info['name'], 'class': info['class'], 'desc': info.get('desc', '')}
+                        for key, info in strats.items()
+                    }
+                    for category, strats in strategies_by_category.items()
+                }
+                message_lines = [f"共 {total_count} 个策略，分为 {len(strategies_by_category)} 类"]
+                for category, strats in strategies_by_category.items():
+                    message_lines.append(f"  {category}: {len(strats)} 个")
+                message = "\n".join(message_lines)
+            else:
+                # 扁平化列表
+                data = {}
+                for category, strats in strategies_by_category.items():
+                    for key, info in strats.items():
+                        data[key] = {**info, 'category': category}
+                message = f"共 {total_count} 个策略"
+
             return ModuleResult(
                 success=True,
-                message=f"共 {len(strategies)} 个策略",
-                data=strategies,
-                metadata={'count': len(strategies)}
+                message=message,
+                data=data,
+                metadata={
+                    'count': total_count,
+                    'categories': len(strategies_by_category),
+                    'by_category': by_category
+                }
             )
-            
+
         except ImportError as e:
             return ModuleResult(
                 success=False,
@@ -234,21 +282,30 @@ class StrategyModule(BaseModule):
         """查看回测历史"""
         try:
             from quant_strategy.analyzer.backtest_history import BacktestHistory
-            
+
             history = BacktestHistory()
-            
-            if ts_code:
-                records = history.get_by_ts_code(ts_code, limit=limit)
-            else:
-                records = history.get_all(limit=limit)
-            
+
+            # 使用 query 方法查询
+            df = history.query(ts_code=ts_code, limit=limit)
+
+            if df.empty:
+                return ModuleResult(
+                    success=True,
+                    message="暂无回测记录",
+                    data=[],
+                    metadata={'count': 0}
+                )
+
+            # 转换为字典列表
+            records = df.to_dict('records')
+
             return ModuleResult(
                 success=True,
                 message=f"回测历史 (共 {len(records)} 条)",
-                data=[self._record_to_dict(r) for r in records],
+                data=records,
                 metadata={'count': len(records)}
             )
-            
+
         except Exception as e:
             return ModuleResult(
                 success=False,
@@ -263,25 +320,26 @@ class StrategyModule(BaseModule):
                 success=False,
                 message="请指定回测 ID"
             )
-        
+
         try:
             from quant_strategy.analyzer.backtest_history import BacktestHistory
-            
+
             history = BacktestHistory()
-            record = history.get_by_id(backtest_id)
             
-            if record:
-                return ModuleResult(
-                    success=True,
-                    message=f"回测详情：{backtest_id}",
-                    data=self._record_to_dict(record)
-                )
-            else:
-                return ModuleResult(
-                    success=False,
-                    message=f"未找到回测记录：{backtest_id}"
-                )
-                
+            # 查找指定 ID 的记录
+            for record in history.records:
+                if record.record_id == backtest_id:
+                    return ModuleResult(
+                        success=True,
+                        message=f"回测详情：{backtest_id}",
+                        data=record.to_dict()
+                    )
+            
+            return ModuleResult(
+                success=False,
+                message=f"未找到回测记录：{backtest_id}"
+            )
+
         except Exception as e:
             return ModuleResult(
                 success=False,
